@@ -385,7 +385,8 @@ namespace MagicStorage.Components
 				Reset();
 
 				if (tag.TryGet("components", out TagCompound data)) {
-					foreach (Point16 loc in data.GetList<Point16>("components")) {
+					string locationsKey = data.ContainsKey("locations") ? "locations" : "components";
+					foreach (Point16 loc in data.GetList<Point16>(locationsKey)) {
 						if (loc.ResolveToTileEntity() is TileEntity te) {
 							if (te is TEStorageComponent component)
 								Link(component);

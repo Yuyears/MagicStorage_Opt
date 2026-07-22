@@ -25,7 +25,7 @@ namespace MagicStorage.Common.Systems {
 
 		private static readonly char[] randomCharacters = Enumerable.Range('0', 10).Concat(Enumerable.Range('A', 26)).Concat(Enumerable.Range('a', 26)).Select(i => (char)i).ToArray();
 
-		private const int KeyLength = 12;
+		internal const int KeyLength = 12;
 
 		private static string GenerateKey() {
 			StringBuilder sb = new(KeyLength);

@@ -98,10 +98,17 @@ namespace MagicStorage.Common.IO {
 			if (head < numBits)
 				throw new InvalidOperationException($"Expected {numBits} bits, found only {head}");
 
-			ulong mask = (1uL << numBits) - 1;
-			ulong shiftOut = _qword0 & mask;
-			_qword0 = (_qword0 >> numBits) | ((_qword1 & mask) << (MAX_LONG - numBits));
-			_qword1 >>= numBits;
+			ulong shiftOut;
+			if (numBits == MAX_LONG) {
+				shiftOut = _qword0;
+				_qword0 = _qword1;
+				_qword1 = 0;
+			} else {
+				ulong mask = (1uL << numBits) - 1;
+				shiftOut = _qword0 & mask;
+				_qword0 = (_qword0 >> numBits) | ((_qword1 & mask) << (MAX_LONG - numBits));
+				_qword1 >>= numBits;
+			}
 			head -= numBits;
 
 			if (typeof(T) == typeof(byte)) {
@@ -139,6 +146,13 @@ namespace MagicStorage.Common.IO {
 
 			if (numBits == 0)
 				return;
+
+			if (typeof(T) == typeof(ulong) && numBits == MAX_LONG) {
+				ulong raw = Unsafe.As<T, ulong>(ref value);
+				SetVariant((uint)raw, ref head, MAX_INT);
+				SetVariant((uint)(raw >> MAX_INT), ref head, MAX_INT);
+				return;
+			}
 
 			int localHead = head;
 			GetDataAndHead(out var dataRef, ref localHead, numBits);

@@ -32,13 +32,13 @@ namespace MagicStorage.Common.IO {
 					value = b == 1;
 				}
 			} else if (value is int i) {
-				if (i >= -4096 && i < 4096)
+				if (i >= sbyte.MinValue && i <= sbyte.MaxValue)
 					id = ID_TINY_INT;
 			} else if (value is short s) {
-				if (s >= -64 && s < 64)
+				if (s >= -8 && s <= 7)
 					id = ID_TINY_SHORT;
 			} else if (value is long l) {
-				if (l >= -262144 && l < 262144)
+				if (l >= -2048 && l <= 2047)
 					id = ID_TINY_LONG;
 			}
 

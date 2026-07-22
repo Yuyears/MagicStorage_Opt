@@ -325,12 +325,12 @@ namespace MagicStorage.Components
 					else if (op.type == Operation.WithdrawThenTryModuleInventory || op.type == Operation.WithdrawToInventoryThenTryModuleInventory)
 					{
 						typesToRefresh.Add(op.item.type);
-						int stack = op.item.stack;
+						Item requested = op.item.Clone();
 						Item item = Withdraw(op.item, false);
 
 						ModPacket packet = PrepareServerResult(op.type);
 						ItemIO.Send(item, packet, true, true);
-						packet.Write(stack);
+						ItemIO.Send(requested, packet, true, true);
 						packet.Send(op.client);
 
 						if (!item.IsAir)

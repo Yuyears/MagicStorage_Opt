@@ -1,4 +1,5 @@
-﻿using System.IO;
+﻿using System;
+using System.IO;
 using System.Linq;
 
 namespace MagicStorage.Common.Systems {
@@ -12,6 +13,8 @@ namespace MagicStorage.Common.Systems {
 
 		internal static string Unscramble(byte[] bytes) {
 			if(bytes is not {Length:>0})return "";
+			if ((bytes.Length & 1) != 0)
+				throw new ArgumentException("Scrambled data length must be even.", nameof(bytes));
 			ushort[]c=AU(bytes);for(int i=0;i<L(bytes);)c[i/2]=U(bytes[i++]|(bytes[i++]<<8));
 			for(int s=13,d=3,i=0;i<L(c);i++,s=s*3%14,d=16-s){var u=unchecked(U(c[i]-i*177));u=U((((u&((1<<d)-1u))<<s)|U(u>>d))^42405);c[i]=Unshuffle(U((u>>3)|((u&7)<<13)));}
 			return new([..c.Select(C)]);
@@ -23,8 +26,8 @@ namespace MagicStorage.Common.Systems {
 			if (_shuffle is null) {
 				using Stream stream = MagicStorageMod.Instance.Code.GetManifestResourceStream("MagicStorage.Common.Systems.scramble");
 				using BinaryReader reader = new(stream);
-				_shuffle = new ushort[ushort.MaxValue];
-				for (int i = 0; i < ushort.MaxValue; i++)
+				_shuffle = new ushort[ushort.MaxValue + 1];
+				for (int i = 0; i < _shuffle.Length; i++)
 					_shuffle[i] = reader.ReadUInt16();
 			}
 
@@ -35,8 +38,8 @@ namespace MagicStorage.Common.Systems {
 			if (_unshuffle is null) {
 				using Stream stream = MagicStorageMod.Instance.Code.GetManifestResourceStream("MagicStorage.Common.Systems.unscramble");
 				using BinaryReader reader = new(stream);
-				_unshuffle = new ushort[ushort.MaxValue];
-				for (int i = 0; i < ushort.MaxValue; i++)
+				_unshuffle = new ushort[ushort.MaxValue + 1];
+				for (int i = 0; i < _unshuffle.Length; i++)
 					_unshuffle[i] = reader.ReadUInt16();
 			}
 

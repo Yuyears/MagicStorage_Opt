@@ -777,14 +777,22 @@ namespace MagicStorage.Common.Systems.Auditing {
 		}
 
 		public override void Deserialize(BinaryReader reader) {
+			Deserialize(reader, legacyCharacterLengths: false);
+		}
+
+		internal void DeserializeLegacy(BinaryReader reader) {
+			Deserialize(reader, legacyCharacterLengths: true);
+		}
+
+		private void Deserialize(BinaryReader reader, bool legacyCharacterLengths) {
 			base.Deserialize(reader);
 			
 			BitsByte bb = reader.ReadByte();
 			bool passwordChanged = false, hasPreviousPassword = false, hasCurrentPassword = false;
 			bb.Retrieve(ref _previous.restricted, ref _current.restricted, ref passwordChanged, ref hasPreviousPassword, ref hasCurrentPassword);
 
-			_previous.password = hasPreviousPassword ? StringScrambling.Unscramble(reader.ReadBytes(reader.Read7BitEncodedInt())) : null;
-			_current.password = !hasCurrentPassword ? null : passwordChanged ? StringScrambling.Unscramble(reader.ReadBytes(reader.Read7BitEncodedInt())) : _previous.password;
+			_previous.password = hasPreviousPassword ? ReadPassword(reader, legacyCharacterLengths) : null;
+			_current.password = !hasCurrentPassword ? null : passwordChanged ? ReadPassword(reader, legacyCharacterLengths) : _previous.password;
 		}
 
 		public override void Serialize(BinaryWriter writer) {
@@ -795,15 +803,35 @@ namespace MagicStorage.Common.Systems.Auditing {
 			bool passwordChanged = _previous.password != _current.password;
 			writer.Write(new BitsByte(_previous.restricted, _current.restricted, passwordChanged, hasPreviousPassword, hasCurrentPassword));
 
-			if (hasPreviousPassword) {
-				writer.Write7BitEncodedInt(_previous.password.Length);
-				writer.Write(StringScrambling.Scramble(_previous.password));
-			}
+			if (hasPreviousPassword)
+				WritePassword(writer, _previous.password);
 
-			if (hasCurrentPassword && passwordChanged) {
-				writer.Write7BitEncodedInt(_current.password.Length);
-				writer.Write(StringScrambling.Scramble(_current.password));
-			}
+			if (hasCurrentPassword && passwordChanged)
+				WritePassword(writer, _current.password);
+		}
+
+		private static string ReadPassword(BinaryReader reader, bool legacyCharacterLength) {
+			int length = reader.Read7BitEncodedInt();
+			if (legacyCharacterLength)
+				length = checked(length * sizeof(char));
+
+			if (length < 0 || length > AuditFile.MaxPasswordBytes || (length & 1) != 0)
+				throw new InvalidDataException($"Audit password length {length} is invalid.");
+
+			byte[] bytes = reader.ReadBytes(length);
+			if (bytes.Length != length)
+				throw new EndOfStreamException($"Audit password declared {length} bytes but only {bytes.Length} were available.");
+
+			return StringScrambling.Unscramble(bytes);
+		}
+
+		private static void WritePassword(BinaryWriter writer, string password) {
+			byte[] bytes = StringScrambling.Scramble(password);
+			if (bytes.Length > AuditFile.MaxPasswordBytes)
+				throw new InvalidDataException($"Audit password exceeds the {AuditFile.MaxPasswordBytes}-byte limit.");
+
+			writer.Write7BitEncodedInt(bytes.Length);
+			writer.Write(bytes);
 		}
 
 		protected override void Stringify(AuditFile source, StringBuilder builder) {

@@ -270,7 +270,7 @@ namespace MagicStorage.Common.IO {
 				}
 
 				// Replace with an error item
-				TagCompound tag = readData.ToTagData();
+				TagCompound tag = readData.ToTagData() ?? [];
 				tag["data"] = saveData;
 				tag["globalData"] = globalSaveData;
 				item = Utility.PrepareFailureItem(nbtFail ? BaseErrorDummyItem.NBTFailItemType : BaseErrorDummyItem.NetReadFailItemType, tag, readData);
@@ -367,6 +367,7 @@ namespace MagicStorage.Common.IO {
 			IDisposable? scope = null;
 
 			try {
+				scope = reader.ReadScope(NetCompression.lengthTiers, optimizeForBytes: false);
 				tagData = ReadTag(reader, tagKeyLookup);
 
 				if (item.ModItem is not UnloadedItem) {
@@ -509,6 +510,9 @@ namespace MagicStorage.Common.IO {
 					else
 						MagicStorageMod.Instance.Logger.Error($"Error loading unknown item from compressed stream", error);
 				}
+
+				if (item is { IsAir: false })
+					items.Add(item);
 			}
 
 			return items;

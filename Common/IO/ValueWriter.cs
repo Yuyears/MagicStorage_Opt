@@ -261,46 +261,50 @@ namespace MagicStorage.Common.IO {
 
 				ValueWriter enclosingWriter = _enclosingScope?.writer ?? _baseWriter;
 
-				writer.Flush();
+				try {
+					writer.Flush();
 
-				byte[] bytes = _stream.ToArray();
+					byte[] bytes = _stream.ToArray();
 
-				// If there's no data, save bits by only writing a flag
-				// This will be the case for e.g. ModItems and GlobalItems that don't send data
-				if (bytes.Length == 0 || writtenBitCount == 0) {
+					// A false flag is the complete encoding for an empty scope.
+					if (bytes.Length == 0 || writtenBitCount == 0) {
+						enclosingWriter.Write(false);
+						if (_enclosingScope is { } emptyParent)
+							emptyParent.writtenBitCount++;
+						return;
+					}
+
 					enclosingWriter.Write(true);
-					return;
+
+					uint bitCount;
+					uint encodedLength;
+					if (_encodeByteLength) {
+						bitCount = Utility.CeilingMultiple(writtenBitCount, 8u);
+						encodedLength = bitCount / 8;
+
+						_lengthWriter.WriteTo(enclosingWriter, encodedLength);
+
+						for (uint i = 0; i < encodedLength; i++)
+							enclosingWriter.Write(bytes[i], 8);
+					} else {
+						bitCount = encodedLength = writtenBitCount;
+						uint remainingBits = bitCount;
+						int i;
+
+						_lengthWriter.WriteTo(enclosingWriter, encodedLength);
+
+						for (i = 0; i < bytes.Length && remainingBits >= 8; i++, remainingBits -= 8)
+							enclosingWriter.Write(bytes[i], 8);
+
+						if (i < bytes.Length && remainingBits > 0)
+							enclosingWriter.Write(bytes[i], (int)remainingBits);
+					}
+
+					if (_enclosingScope is { } parent)
+						parent.writtenBitCount += checked(1u + (uint)_lengthWriter.GetBitCost(encodedLength) + bitCount);
+				} finally {
+					_baseWriter._activeScope = _enclosingScope;
 				}
-
-				enclosingWriter.Write(false);
-
-				uint bitCount;
-				if (_encodeByteLength) {
-					bitCount = Utility.CeilingMultiple(writtenBitCount, 8u);
-					uint byteCount = bitCount / 8;
-
-					_lengthWriter.WriteTo(enclosingWriter, byteCount);
-
-					for (uint i = 0; i < byteCount; i++)
-						enclosingWriter.Write(bytes[i], 8);
-				} else {
-					bitCount = writtenBitCount;
-					uint remaningBits = bitCount;
-					int i;
-
-					_lengthWriter.WriteTo(enclosingWriter, remaningBits);
-
-					for (i = 0; i < bytes.Length && remaningBits >= 8; i++, remaningBits -= 8)
-						enclosingWriter.Write(bytes[i], 8);
-
-					if (i < bytes.Length && remaningBits > 0)
-						enclosingWriter.Write(bytes[i], (int)remaningBits);
-				}
-
-				if (_enclosingScope is { } scope)
-					scope.writtenBitCount += bitCount;
-
-				_baseWriter._activeScope = _enclosingScope;
 			}
 		}
 	}

@@ -122,10 +122,8 @@ namespace MagicStorage.Common.IO {
 			T read = _bits.GetVariant<T>(ref _head, (byte)numBits);
 			bool negative = (read & (T.One << (numBits - 1))) != T.Zero;
 
-			if (negative) {
-				long mask = -1 << numBits;
-				read = Unsafe.As<long, T>(ref mask) | read; // Sign extend
-			}
+			if (negative && numBits < Unsafe.SizeOf<T>() * 8)
+				read |= ~T.Zero << numBits;
 
 			return read;
 		}

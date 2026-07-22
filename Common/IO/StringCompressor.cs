@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Runtime.CompilerServices;
 
 namespace MagicStorage.Common.IO {
 	internal static class StringCompressor {
@@ -19,6 +18,9 @@ namespace MagicStorage.Common.IO {
 		/// This method is optimized for short (length &lt; 32) ASCII strings
 		/// </summary>
 		public static void WriteTo(ValueWriter writer, string value) {
+			ArgumentNullException.ThrowIfNull(value);
+			ArgumentOutOfRangeException.ThrowIfGreaterThan(value.Length, ushort.MaxValue);
+
 			// Metadata for the string is included in a prefix of bits
 			// Metadata is optimized for short ASCII strings
 
@@ -53,15 +55,14 @@ namespace MagicStorage.Common.IO {
 			if (strLength == 0)
 				return string.Empty;
 
-			Span<char> chars = strLength < 2048 ? stackalloc char[strLength] : new char[2048];
-			ref char c = ref chars[0];
+			Span<char> chars = strLength < 2048 ? stackalloc char[strLength] : new char[strLength];
 
 			if (ascii) {
-				for (int i = 0; i < strLength; i++, c = ref Unsafe.Add(ref c, 1))
-					c = (char)reader.ReadByte(7);
+				for (int i = 0; i < strLength; i++)
+					chars[i] = (char)reader.ReadByte(7);
 			} else {
-				for (int i = 0; i < strLength; i++, c = ref Unsafe.Add(ref c, 1))
-					c = (char)reader.ReadUInt16(16);
+				for (int i = 0; i < strLength; i++)
+					chars[i] = (char)reader.ReadUInt16(16);
 			}
 
 			return new string(chars);

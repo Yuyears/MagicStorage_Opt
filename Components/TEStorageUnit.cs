@@ -14,6 +14,7 @@ using Terraria;
 using Terraria.DataStructures;
 using Terraria.ID;
 using Terraria.ModLoader;
+using Terraria.ModLoader.Default;
 using Terraria.ModLoader.IO;
 
 namespace MagicStorage.Components
@@ -200,7 +201,17 @@ namespace MagicStorage.Components
 			for (int k = items.Count - 1; k >= 0; k--)
 			{
 				Item item = items[k];
-				if ((checkPrefix && ItemData.Matches(lookFor, item)) || (!checkPrefix && lookFor.type == item.type))
+				bool matches = (checkPrefix && ItemData.Matches(lookFor, item)) || (!checkPrefix && lookFor.type == item.type);
+				if (matches && lookFor.ModItem is UnloadedItem requested) {
+					if (item.ModItem is not UnloadedItem candidate
+					|| requested.ModName != candidate.ModName
+					|| requested.ItemName != candidate.ItemName)
+						matches = false;
+					else if (!TagCompoundComparer.SemanticallyEquals(requested.data, candidate.data))
+						matches = false;
+				}
+
+				if (matches)
 				{
 					int maxToTake = item.stack;
 					if (item.stack > 0 && item.favorited && keepOneIfFavorite)

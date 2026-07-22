@@ -430,15 +430,16 @@ cleanupContext:
 			else if (op == TEStorageHeart.Operation.WithdrawThenTryModuleInventory || op == TEStorageHeart.Operation.WithdrawToInventoryThenTryModuleInventory)
 			{
 				Item item  = ItemIO.Receive(reader, true, true);
+				Item requested = ItemIO.Receive(reader, true, true);
 
 				if (item.IsAir)
-					item = CraftingGUI.TryToWithdrawFromModuleItems(heart, item, wasAlreadyCloned: true);
+					item = CraftingGUI.TryToWithdrawFromModuleItems(heart, requested, wasAlreadyCloned: true);
 
 				if (Main.netMode == NetmodeID.MultiplayerClient)
 					StoragePlayer.GetItem(new EntitySource_TileEntity(heart), item, op != TEStorageHeart.Operation.WithdrawToInventoryThenTryModuleInventory);
 			}
 
-			heart.netcodeUpdate = true;
+			heart.netcodeUpdate = false;
 			heart.netDesync = 0;
 
 printReport:
@@ -490,8 +491,9 @@ printReport:
 			if (position.ResolveToTileEntity() is TEStorageHeart heart && StoragePlayer.IsClientViewingHeart(heart)) {
 				MagicUI.IgnoreSpecificZoneRefreshing = ignoreSpecificRefreshes;
 				MagicUI.SetNextCollectionsToRefresh(types);
+				MagicUI.RequestMainZoneThread();
 
-				heart.netcodeUpdate = true;
+				heart.netcodeUpdate = false;
 				heart.netDesync = 0;
 			}
 
@@ -1194,9 +1196,9 @@ printReport:
 			if (Main.netMode != NetmodeID.Server)
 				return;
 
-			string key = StringScrambling.Unscramble(bytes);
-
-			bool valid = key == Netcode.ServerOperatorKey;
+			bool valid = count == Netcode.KeyLength * sizeof(char)
+				&& bytes.Length == count
+				&& StringScrambling.Unscramble(bytes) == Netcode.ServerOperatorKey;
 
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
 			packet.Write((byte)MessageType.ServerOpConfirmationResult);

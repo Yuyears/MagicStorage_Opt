@@ -50,6 +50,7 @@ namespace MagicStorage.Components
 		private readonly Queue<NetOperation> netOpQueue = new();
 		private HashSet<ItemData> hasItem = new();
 		private HashSet<int> hasItemNoPrefix = new();
+		private bool fullSyncRequired;
 
 		//metadata
 		private HashSet<ItemData> hasSpaceInStack = new();
@@ -691,6 +692,7 @@ namespace MagicStorage.Components
 						{
 							// FIX: v0.7.1 - Item data should use the original tag information, not the netcode data
 							case NetOperations.FullySync:
+								fullSyncRequired = false;
 								repairMetaData = false;
 								ClearItemsData();
 								List<Item> netItems = SaveCompression.LoadItems(bitReader, true, true, listCountBitSizeOverride: capacityBits);
@@ -704,6 +706,7 @@ namespace MagicStorage.Components
 									hasItem.Add(data);
 									hasItemNoPrefix.Add(data.Type);
 								}
+								MagicUI.RequestFullRefresh();
 								break;
 							case NetOperations.Withdraw:
 								bool keepOneIfFavorite = bitReader.ReadBoolean();
@@ -749,10 +752,16 @@ namespace MagicStorage.Components
 			}
 			else if (serverItemsCount != items.Count) // if there is mismatch between the server and the client then send a sync request
 			{
+				fullSyncRequired = true;
 				NetHelper.Report(true, $"Item count mismatch detected for TEStorageUnit (Server: {serverItemsCount}, Client: {items.Count}), requesting full sync");
 
 				NetHelper.SyncStorageUnit(Position);
 			}
+		}
+
+		internal void RetryFullSyncIfNeeded() {
+			if (Main.netMode == NetmodeID.MultiplayerClient && fullSyncRequired)
+				NetHelper.SyncStorageUnit(Position);
 		}
 
 		private void ClearItemsData()

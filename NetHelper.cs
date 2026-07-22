@@ -73,6 +73,10 @@ namespace MagicStorage
 		public static void HandlePacket(BinaryReader reader, int sender)
 		{
 			MessageType type = (MessageType)reader.ReadByte();
+			if (!InboundPacketGuard.Accept(type, sender)) {
+				reader.BaseStream.Position = reader.BaseStream.Length;
+				return;
+			}
 
 			/*
 			if (Main.netMode == NetmodeID.MultiplayerClient)
@@ -273,15 +277,8 @@ namespace MagicStorage
 				//byte remoteClient = reader.ReadByte();
 				Point16 position = new(reader.ReadInt16(), reader.ReadInt16());
 
-				if (!TileEntity.ByPosition.TryGetValue(position, out TileEntity tileEntity)) {
-					Report(true, MessageType.SyncStorageUnit + " packet had a data mismatch");
-					Report(false, "  A Tile Entity at location (X: " + position.X + ", Y: " + position.Y + ") does not exist on the server");
-					return;
-				}
-
-				if (tileEntity is not TEStorageUnit storageUnit) {
-					Report(true, MessageType.SyncStorageUnit + " received a position for a Tile Entity that isn't a TEStorageUnit: (X: " + position.X + ", Y: " + position.Y + ")");
-					Report(false, "  Tile Entity type was actually " + tileEntity.GetType().FullName);
+				if (!InboundPacketGuard.TryGetStorageEntity(position, remoteClient, out TEStorageUnit storageUnit, out _)) {
+					Report(true, MessageType.SyncStorageUnit + " rejected an invalid or inaccessible Storage Unit at (X: " + position.X + ", Y: " + position.Y + ")");
 					return;
 				}
 
@@ -289,7 +286,7 @@ namespace MagicStorage
 
 				ModPacket packet = MagicStorageMod.Instance.GetPacket();
 				packet.Write((byte)MessageType.SyncStorageUnitToClinet);
-				TileEntity.Write(packet, tileEntity, true);
+				TileEntity.Write(packet, storageUnit, true);
 				packet.Send(remoteClient);
 
 				Report(true, MessageType.SyncStorageUnit + " packet received by server from client " + remoteClient);
@@ -522,16 +519,11 @@ printReport:
 
 			if (Main.netMode == NetmodeID.Server)
 			{
-				TileEntity ent = TileEntity.ByPosition[position];
-				if (ent is TEStorageUnit storageUnit)
+				if (InboundPacketGuard.TryGetStorageEntity(position, sender, out TEStorageUnit storageUnit, out TEStorageHeart heart, requireInteractionRange: true))
 				{
 					storageUnit.Inactive = inActive;
 					storageUnit.UpdateTileFrameWithNetSend();
-					TEStorageHeart heart = storageUnit.GetHeart();
-					if (heart != null)
-					{
-						heart.ResetCompactStage();
-					}
+					heart.ResetCompactStage();
 				}
 
 				Report(true, MessageType.ClientSendDeactivate + " packet received by server from client " + sender);
@@ -728,6 +720,9 @@ printReport:
 		{
 			Point16 position = new(reader.ReadInt16(), reader.ReadInt16());
 			int withdrawCount = reader.ReadInt32();
+			if (!InboundPacketGuard.IsValidCount(withdrawCount, InboundPacketGuard.MaxItemEntries)
+			|| !InboundPacketGuard.TryGetStorageEntity(position, sender, out TEStorageHeart heart, out _))
+				return;
 
 		//	PrintClientRequest(sender, "Craft", position);
 
@@ -741,15 +736,15 @@ printReport:
 			}
 
 			int resultsCount = reader.ReadInt32();
+			if (!InboundPacketGuard.IsValidCount(resultsCount, InboundPacketGuard.MaxItemEntries))
+				return;
+
 			List<Item> results = new();
 			for (int k = 0; k < resultsCount; k++) {
 				Item result = ItemIO.Receive(reader, true, true);
 				results.Add(result);
 				typesToUpdate.Add(result.type);
 			}
-
-			if (!TileEntity.ByPosition.TryGetValue(position, out TileEntity te) || te is not TEStorageHeart heart)
-				return;
 
 			Report(true, MessageType.CraftRequest + " packet received by server from client " + sender);
 
@@ -884,15 +879,16 @@ printReport:
 			if (Main.netMode != NetmodeID.Server)
 				return;
 
-			if (!TileEntity.ByPosition.TryGetValue(destination, out TileEntity tileEntity) || tileEntity is not TEStorageUnit unitDestination) {
+			if (!InboundPacketGuard.TryGetStorageEntity(destination, sender, out TEStorageUnit unitDestination, out TEStorageHeart destinationHeart)) {
 				Report(true, MessageType.TransferItems + " packet failed to read on the server.\n" +
-					"Reason: Destination was not a Storage Unit");
+					"Reason: Destination was not an accessible Storage Unit");
 				return;
 			}
 
-			if (!TileEntity.ByPosition.TryGetValue(source, out tileEntity) || tileEntity is not TEStorageUnit unitSource) {
+			if (!InboundPacketGuard.TryGetStorageEntity(source, sender, out TEStorageUnit unitSource, out TEStorageHeart sourceHeart)
+			|| sourceHeart.Position != destinationHeart.Position) {
 				Report(true, MessageType.TransferItems + " packet failed to read on the server.\n" +
-					"Reason: Source was not a Storage Unit");
+					"Reason: Source was not an accessible Storage Unit in the same network");
 				return;
 			}
 
@@ -1318,16 +1314,14 @@ printReport:
 			Point16 heart = reader.ReadPoint16();
 
 			int count = reader.ReadUInt16();
+			if (!InboundPacketGuard.IsValidCount(count, InboundPacketGuard.MaxBankEntries)
+			|| !InboundPacketGuard.TryGetStorageEntity(heart, sender, out TEStorageHeart storageHeart, out _))
+				return;
 
 			Item[] inventory = new Item[count];
 
 			for (int i = 0; i < count; i++)
 				inventory[i] = ItemIO.Receive(reader, true, true);
-
-			if (!TileEntity.ByPosition.TryGetValue(heart, out TileEntity heartEntity) || heartEntity is not TEStorageHeart storageHeart) {
-				Report(true, MessageType.ClientRequestPlayerBankDeposit + " packet was malformed: Storage Heart location did not have a Storage Heart");
-				return;
-			}
 
 			if (Main.netMode != NetmodeID.Server) {
 				Report(true, MessageType.ClientRequestPlayerBankDeposit + " packet received by client " + Main.myPlayer);

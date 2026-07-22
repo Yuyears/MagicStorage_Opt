@@ -215,7 +215,14 @@ namespace MagicStorage
 			MagicUI.RequestFullRefresh();
 			MagicUI.IgnoreSpecificZoneRefreshing = true;
 
-			GetStorageHeart()?.LockOnCurrentClient();
+			TEStorageHeart heart = GetStorageHeart();
+			if (heart is not null) {
+				foreach (TEAbstractStorageUnit unit in heart.GetStorageUnits())
+					if (unit is TEStorageUnit storageUnit)
+						storageUnit.RetryFullSyncIfNeeded();
+
+				heart.LockOnCurrentClient();
+			}
 		}
 
 		public void CloseStorage()

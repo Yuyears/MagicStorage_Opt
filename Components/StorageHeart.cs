@@ -1,6 +1,5 @@
 using MagicStorage.Common.Systems;
 using MagicStorage.Common.Systems.Auditing;
-using MagicStorage.Common.Systems.Debugging;
 using MagicStorage.Items;
 using Terraria;
 using Terraria.DataStructures;
@@ -64,41 +63,21 @@ namespace MagicStorage.Components
 
 		public override void KillTile(int i, int j, ref bool fail, ref bool effectOnly, ref bool noItem)
 		{
-			base.KillTile(i, j, ref fail, ref effectOnly, ref noItem);
-
-			if (fail || effectOnly)
-				return;
-
-			if (Main.tile[i, j].TileFrameX % 36 == 18)
+			if (Main.tile[i, j].TileFrameX > 0)
 				i--;
-			if (Main.tile[i, j].TileFrameY % 36 == 18)
+			if (Main.tile[i, j].TileFrameY > 0)
 				j--;
 
 			if (!TileEntity.ByPosition.TryGetValue(new Point16(i, j), out TileEntity te) || te is not TEStorageHeart heart)
 				return;
 
-			using var debugging = DebugMessage.CreateIfAny(DebugControls.Names.StorageComponentDestruction, DebugControls.Names.StorageHeartUsage);
+			NetHelper.Report(true, $"Checking if heart entity at location X={i}, Y={j} is used by any clients...");
 
-			if (debugging.IsDebugging) {
-				debugging
-					.Report(true, "Checking if any clients are using the Storage Heart at {0}...", heart.Position.DebugString())
-					.Indent();
-			}
-
-			bool inUse = heart.AnyClientUsingThis();
-
-			if (debugging.IsDebugging)
-				debugging.Unindent();
-
-			if (inUse) {
-				if (debugging.IsDebugging)
-					debugging.Report(false, "Entity is locked, preventing destruction");
-
+			if (heart.AnyClientUsingThis()) {
+				NetHelper.Report(false, "Heart entity is currently in use, preventing destruction");
 				fail = true;
-			} else {
-				if (debugging.IsDebugging)
-					debugging.Report(false, "Entity is unlocked, allowing destruction");
-			}
+			} else
+				NetHelper.Report(false, "Heart entity is currently not in use, allowing destruction");
 		}
 	}
 }

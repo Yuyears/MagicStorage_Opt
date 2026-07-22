@@ -1,23 +1,22 @@
-using MagicStorage.Common;
-using MagicStorage.Common.Systems;
-using MagicStorage.Common.Systems.Auditing;
-using MagicStorage.Common.Systems.Debugging;
-using MagicStorage.CrossMod;
-using Microsoft.Xna.Framework;
-using System;
-using System.Collections;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using Terraria;
 using Terraria.DataStructures;
 using Terraria.ID;
-using Terraria.Localization;
 using Terraria.ModLoader;
-using Terraria.ModLoader.Default;
 using Terraria.ModLoader.IO;
+using System.Collections.Concurrent;
+using Terraria.ModLoader.Default;
+using Terraria.Localization;
+using Microsoft.Xna.Framework;
+using System;
+using MagicStorage.Common.Systems;
+using System.Collections;
+using MagicStorage.Common;
+using System.Runtime.CompilerServices;
+using MagicStorage.Common.Systems.Auditing;
+using MagicStorage.CrossMod;
 
 namespace MagicStorage.Components
 {
@@ -108,7 +107,7 @@ namespace MagicStorage.Components
 			IsAlive = false;
 		}
 
-		public override bool ValidTile(in Tile tile) => TileLoader.GetTile(tile.TileType) is StorageHeart && tile.TileFrameX == 0 && tile.TileFrameY == 0;
+		public override bool ValidTile(in Tile tile) => tile.TileType == ModContent.TileType<StorageHeart>() && tile.TileFrameX == 0 && tile.TileFrameY == 0;
 
 		public override TEStorageHeart GetHeart() => this;
 
@@ -120,11 +119,7 @@ namespace MagicStorage.Components
 				}
 
 				if (clientUsingHeart[i]) {
-					using var debugging = DebugMessage.CreateIf(DebugControls.Names.StorageHeartUsage);
-
-					if (debugging.IsDebugging)
-						debugging.Report(false, "Client {0} is holding a lock on the Storage Heart at {1}", i, Position.DebugString());
-
+					NetHelper.Report(false, $"Client {i} is currently using this Storage Heart entity");
 					return true;
 				}
 			}
@@ -133,20 +128,14 @@ namespace MagicStorage.Components
 		}
 
 		public void LockOnCurrentClient() {
-			using var debugging = DebugMessage.CreateIf(DebugControls.Names.StorageHeartUsage);
-
-			if (debugging.IsDebugging)
-				debugging.Report(true, "Locking Storage Heart at {0}", Position.DebugString());
+			NetHelper.Report(true, $"Locking storage heart at X={Position.X}, Y={Position.Y}");
 
 			clientUsingHeart[Main.myPlayer] = true;
 			NetHelper.ClientInformStorageHeartUsage(this);
 		}
 
 		public void UnlockOnCurrentClient() {
-			using var debugging = DebugMessage.CreateIf(DebugControls.Names.StorageHeartUsage);
-
-			if (debugging.IsDebugging)
-				debugging.Report(true, "Unlocking Storage Heart at {0}", Position.DebugString());
+			NetHelper.Report(true, $"Unlocking storage heart at X={Position.X}, Y={Position.Y}");
 
 			clientUsingHeart[Main.myPlayer] = false;
 			NetHelper.ClientInformStorageHeartUsage(this);
@@ -156,7 +145,7 @@ namespace MagicStorage.Components
 		{
 			ConnectedComponentManager manager = ComponentManager;
 
-			IEnumerable<TEAbstractStorageUnit> remoteStorageUnits = manager.GetStorageCenterEntities().SelectMany(center => center.ComponentManager.GetStorageUnitEntities());
+			IEnumerable<TEAbstractStorageUnit> remoteStorageUnits = manager.GetRemoteAccessEntities().SelectMany(remoteAccess => remoteAccess.ComponentManager.GetStorageUnitEntities());
 
 			return manager.GetStorageUnitEntities().Concat(remoteStorageUnits);
 		}
@@ -367,38 +356,20 @@ namespace MagicStorage.Components
 			{
 				bool keepOneIfFavorite = reader.ReadBoolean();
 				Item item = ItemIO.Receive(reader, true, true);
-
-				if (NetHelper.CanDebugIncomingPackets() && DebugControls.Get(DebugControls.Names.StorageOperationsNetcode)) {
-					DebugMessage.Report(false, "Read favorite: {0}", keepOneIfFavorite);
-					DebugMessage.Report(false, "Read item: {0}", item.IdentifierAndStack());
-				}
-
 				netOp = new NetOperation(op, item, keepOneIfFavorite, client);
 			}
 			else if (op == Operation.Deposit)
 			{
 				Item item = ItemIO.Receive(reader, true, true);
-
-				if (NetHelper.CanDebugIncomingPackets() && DebugControls.Get(DebugControls.Names.StorageOperationsNetcode))
-					DebugMessage.Report(false, "Read item: {0}", item.IdentifierAndStack());
-
 				netOp = new NetOperation(op, item, client);
 			}
 			else if (op == Operation.DepositAll)
 			{
 				int count = reader.ReadByte();
-
-				if (NetHelper.CanDebugIncomingPackets() && DebugControls.Get(DebugControls.Names.StorageOperationsNetcode))
-					DebugMessage.Report(false, "Read item count: {0}", count);
-
 				List<Item> items = new();
 				for (int k = 0; k < count; k++)
 				{
 					Item item = ItemIO.Receive(reader, true, true);
-
-					if (NetHelper.CanDebugIncomingPackets() && DebugControls.Get(DebugControls.Names.StorageOperationsNetcode))
-						DebugMessage.Report(false, "Read item: {0}", item.IdentifierAndStack());
-
 					items.Add(item);
 				}
 				netOp = new NetOperation(op, items, client);
@@ -406,10 +377,6 @@ namespace MagicStorage.Components
 			else if (op == Operation.WithdrawAllAndDestroy)
 			{
 				int type = reader.ReadInt32();
-
-				if (NetHelper.CanDebugIncomingPackets() && DebugControls.Get(DebugControls.Names.StorageOperationsNetcode))
-					DebugMessage.Report(false, "Read item type: {0}", type);
-
 				Item dummy = new Item(type);
 				netOp = new NetOperation(op, dummy, client);
 			}
@@ -420,20 +387,12 @@ namespace MagicStorage.Components
 			else if (op == Operation.WithdrawThenTryModuleInventory || op == Operation.WithdrawToInventoryThenTryModuleInventory)
 			{
 				Item item = ItemIO.Receive(reader, true, true);
-
-				if (NetHelper.CanDebugIncomingPackets() && DebugControls.Get(DebugControls.Names.StorageOperationsNetcode))
-					DebugMessage.Report(false, "Read item: {0}", item.IdentifierAndStack());
-
 				netOp = new NetOperation(op, item, false, client);
 			}
 
 			if (netOp is not null) {
-				if (SecuritySystem.TryGetCurrentAccessContext(out var context)) {
+				if (SecuritySystem.TryGetCurrentAccessContext(out var context))
 					netOp.AccessingPlayer = context.Player;
-
-					if (NetHelper.CanDebugIncomingPackets() && DebugControls.Get(DebugControls.Names.StorageOperationsNetcode))
-						DebugMessage.Report(false, "Accessing player: {0}", context.Player);
-				}
 
 				// CHANGE: v0.7.1 - netMode check was moved to here so that NetHelper code is shorter
 				if (Main.netMode == NetmodeID.Server)
@@ -977,104 +936,65 @@ namespace MagicStorage.Components
 				itemData = Utility.ToByteSpanNoCompression(clone);
 			}
 
-			using var debugging = DebugMessage.CreateIf(DebugControls.Names.StorageHeartItemDeletion);
-
-			if (debugging.IsDebugging) {
-				debugging
-					.Report(true, new NetmodeContextMessage(
-						ChatMessage: new("Attempting to delete {0} ...", clone.ToChatTag()),
-						ConsoleOrLogMessage: new("Attempting to delete item \"{0}\"...", clone.PrefixedIdentifierAndStack())
-					))
-					.Indent();
-			}
-
 			bool anyDeleted = false;
 
-			using (var debuggingVerbose = debugging.CreateIf(DebugControls.Names.StorageHeartItemDeletionVerbose)) {
-				foreach (TEStorageUnit unit in GetStorageUnits().OfType<TEStorageUnit>()) {
-					if (debuggingVerbose.IsDebugging) {
-						debuggingVerbose
-							.Report(false, "Checking unit {0} at {1}...", unit.FullName, unit.Position.DebugString())
-							.Indent();
+			foreach (TEStorageUnit unit in GetStorageUnits().OfType<TEStorageUnit>()) {
+				if (unit.IsEmpty || !unit.HasItem(clone, ignorePrefix: true))
+					continue;
+
+				for (int i = unit.items.Count - 1; i >= 0; i--) {
+					Item storage = unit.items[i];
+					if (storage.type != clone.type)
+						continue;
+
+					ReadOnlySpan<byte> storageData;
+
+					if (savedItemTagIO is not null && savedItemTagIO.TryGetValue(storage, out var storageDataArray)) {
+						// Retrieve the cached value
+						storageData = storageDataArray;
+					} else {
+						// Stack should be ignored when comparing data
+						using (ObjectSwitch.Create(ref storage.stack, 1))
+							storageDataArray = Utility.ToByteArrayNoCompression(storage);
+
+						// Cache the value
+						savedItemTagIO?.Add(storage, storageDataArray);
+						storageData = storageDataArray;
 					}
 
-					if (unit.IsEmpty || !unit.HasItem(clone, ignorePrefix: true)) {
-						if (debuggingVerbose.IsDebugging)
-							debuggingVerbose.Report(false, "Failed.  Unit did not contain the requested item.");
+					// Must be an exact match
+					if (itemData.SequenceEqual(storageData)) {
+						if (itemCountToDelete >= storage.stack) {
+							itemCountToDelete -= storage.stack;
 
-						goto NextUnit;
-					}
-
-					for (int i = unit.items.Count - 1; i >= 0; i--) {
-						Item storage = unit.items[i];
-						if (storage.type != clone.type)
-							continue;
-
-						ReadOnlySpan<byte> storageData;
-
-						if (savedItemTagIO is not null && savedItemTagIO.TryGetValue(storage, out var storageDataArray)) {
-							// Retrieve the cached value
-							storageData = storageDataArray;
+							unit.items.RemoveAt(i);
+							savedItemTagIO?.Remove(storage);
 						} else {
-							// Stack should be ignored when comparing data
-							using (ObjectSwitch.Create(ref storage.stack, 1))
-								storageDataArray = Utility.ToByteArrayNoCompression(storage);
-
-							// Cache the value
-							savedItemTagIO?.Add(storage, storageDataArray);
-							storageData = storageDataArray;
+							storage.stack -= itemCountToDelete;
+							itemCountToDelete = 0;
 						}
 
-						// Must be an exact match
-						if (itemData.SequenceEqual(storageData)) {
-							if (itemCountToDelete >= storage.stack) {
-								if (debuggingVerbose.IsDebugging)
-									debuggingVerbose.Report(false, "Deleting {0}/{0} items...", storage.stack);
+						ResetCompactStage();
 
-								itemCountToDelete -= storage.stack;
+						unit.PostChangeContents();
 
-								unit.items.RemoveAt(i);
-								savedItemTagIO?.Remove(storage);
-							} else {
-								if (debuggingVerbose.IsDebugging)
-									debuggingVerbose.Report(false, "Deleting {0}/{1} items...", itemCountToDelete, storage.stack);
+						anyDeleted = true;
 
-								storage.stack -= itemCountToDelete;
-								itemCountToDelete = 0;
-							}
-
-							ResetCompactStage();
-
-							unit.PostChangeContents();
-
-							anyDeleted = true;
-
-							if (itemCountToDelete <= 0) {
-								itemCountToDelete = 0;
-								goto CheckForRefreshing;
-							}
+						if (itemCountToDelete <= 0) {
+							itemCountToDelete = 0;
+							goto CheckForRefreshing;
 						}
 					}
-
-					NextUnit:
-
-					if (debuggingVerbose.IsDebugging)
-						debuggingVerbose.Unindent();
 				}
 			}
 
 			CheckForRefreshing:
 
-			if (debugging.IsDebugging)
-				debugging.Report(false, "Deleted {0}/{1} items.", origToDelete - itemCountToDelete, origToDelete);
-
-			if (anyDeleted) {
-				if (Main.netMode == NetmodeID.SinglePlayer) {
-					MagicUI.RequestMainZoneThread();
-					MagicUI.IgnoreSpecificZoneRefreshing = true;
-				} else
-					NetHelper.SendRefreshNetworkItems(Position, ignoreSpecificRefreshes: true);
-			}
+			if (Main.netMode == NetmodeID.SinglePlayer) {
+				MagicUI.RequestMainZoneThread();
+				MagicUI.IgnoreSpecificZoneRefreshing = true;
+			} else
+				NetHelper.SendRefreshNetworkItems(Position, ignoreSpecificRefreshes: true);
 
 			return itemCountToDelete < origToDelete;
 		}
@@ -1192,8 +1112,6 @@ namespace MagicStorage.Components
 			const int STRIDE = 1000;
 			int chunkCount = (int)Math.Ceiling(history.Length / (double)STRIDE);
 
-			using var debugging = DebugMessage.CreateIf(DebugControls.Names.StorageHistoryNetcode);
-
 			for (int i = 0; i < history.Length; i += STRIDE) {
 				var packet = MagicStorageMod.Instance.GetPacket();
 				packet.Write((byte)MessageType.ServerResponseDepositHistoryChunks);
@@ -1303,10 +1221,19 @@ namespace MagicStorage.Components
 			}
 		}
 
-		[Obsolete("This method has been replaced by " + nameof(SendDepositHistoryChunks), error: true)]
-		public void SendHistory(BinaryWriter writer) { }
+		public void SendHistory(BinaryWriter writer) {
+			writer.Write(_uniqueItemsPutHistory.Count);
 
-		[Obsolete("This method has been replaced by " + nameof(ReceiveDepositHistoryChunk), error: true)]
-		public void ReceiveHistory(BinaryReader reader) { }
+			foreach (Item item in _uniqueItemsPutHistory.Items)
+				writer.Write(item.type);
+		}
+
+		public void ReceiveHistory(BinaryReader reader) {
+			_uniqueItemsPutHistory.Clear();
+
+			int count = reader.ReadInt32();
+			for (int i = 0; i < count; i++)
+				_uniqueItemsPutHistory.Add(reader.ReadInt32());
+		}
 	}
 }

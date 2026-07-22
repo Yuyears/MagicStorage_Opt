@@ -90,9 +90,13 @@ namespace MagicStorage.Common.Systems {
 		}
 
 		public override void PostDrawTiles() {
-		//	if (!MagicStorageMod.UsingPrivateBeta || Main.gameMenu)
-			if (Main.gameMenu || !MagicStorageConfig.ShowPylonAccessAreasInWorld)
+			if (!MagicStorageMod.UsingPrivateBeta || Main.gameMenu)
 				return;
+
+			#if NETPLAY
+			if (!MagicStorageBetaConfig.ShowDebugPylonRangeAreas)
+				return;
+			#endif
 
 			if (!CanDrawAreas(Main.LocalPlayer, out Point16 accessLocation, out float playerToPylonRange))
 				return;

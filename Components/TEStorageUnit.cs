@@ -1,7 +1,6 @@
 using Ionic.Zlib;
 using MagicStorage.Common.IO;
 using MagicStorage.Common.Systems;
-using MagicStorage.Common.Systems.Debugging;
 using MagicStorage.CrossMod;
 using MagicStorage.CrossMod.Storage;
 using MagicStorage.Items;
@@ -99,7 +98,7 @@ namespace MagicStorage.Components
 			active = !Inactive;
 		}
 
-		public override bool ValidTile(in Tile tile) => TileLoader.GetTile(tile.TileType) is StorageUnit && tile.TileFrameX % 36 == 0 && tile.TileFrameY % 36 == 0;
+		public override bool ValidTile(in Tile tile) => tile.TileType == ModContent.TileType<StorageUnit>() && tile.TileFrameX % 36 == 0 && tile.TileFrameY % 36 == 0;
 
 		public override bool HasSpaceInStackFor(Item check)
 		{
@@ -269,17 +268,6 @@ namespace MagicStorage.Components
 			tier.Frame(currentFullness, currentActive, out int targetFrameX, out int targetFrameY);
 
 			if (previousFullness != currentFullness || previousActive != currentActive || _lastKnownFramingTier != tier.Type) {
-				using var debugging = DebugMessage.CreateIf(DebugControls.Names.StorageUnitFrame);
-
-				if (debugging.IsDebugging) {
-					debugging
-						.Report(true, "Storage Unit framing is being updated for tile entity at {0}", Position.DebugString())
-						.Indent()
-						.Report(false, "Tier: {0} -> {1}", StorageUnitTierLoader.SafelyGetTierName(_lastKnownFramingTier), StorageUnitTierLoader.SafelyGetTierName(tier.Type))
-						.Report(false, "Fullness: {0} -> {1}", previousFullness, currentFullness)
-						.Report(false, "Active: {0} -> {1}", previousActive, currentActive);
-				}
-
 				_lastKnownFramingTier = tier.Type;
 
 				int x = Position.X, y = Position.Y;
@@ -783,7 +771,7 @@ namespace MagicStorage.Components
 		{
 			RepairMetadata();
 			UpdateTileFrameWithNetSend();
-			NetHelper.SendTEUpdate(ID);
+			NetHelper.SendTEUpdate(ID, Position);
 		}
 	}
 }

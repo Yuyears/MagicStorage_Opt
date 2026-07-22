@@ -1,6 +1,5 @@
 ﻿using MagicStorage.Common.Players;
 using MagicStorage.Common.Systems;
-using MagicStorage.Common.Systems.Debugging;
 using Microsoft.Xna.Framework;
 using System.Collections.Generic;
 using System.Linq;
@@ -33,11 +32,6 @@ namespace MagicStorage.Common.Commands {
 				caller.Reply(Mod.GetLocalization("ServerOperator.CommandInfo.AlreadyAdmin").Value, Color.Red);
 				return;
 			}
-
-			using var debugging = DebugMessage.CreateIf(DebugControls.Names.CommandGrantAdministrator);
-
-			if (debugging.IsDebugging)
-				debugging.Report(true, "Preparing chat interceptions for key request...");
 
 			NetHelper.ClientRequestServerOperator();
 		}

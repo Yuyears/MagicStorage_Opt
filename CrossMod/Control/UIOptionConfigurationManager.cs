@@ -182,16 +182,17 @@ namespace MagicStorage.CrossMod.Control {
 			try {
 				Directory.CreateDirectory(DestinationFolder);
 
-				string path = DestinationPath;
-				if (!File.Exists(path)) {
+				if (!File.Exists(DestinationPath)) {
 					//No file?  Default to a base configuration
 					goto UseDefault;
 				} else {
 					try {
-						TagCompound tag = TagIO.FromFile(path);
+						TagCompound tag = TagIO.FromFile(DestinationPath);
 
-						if (tag.GetList<TagCompound>("options") is not { Count: >0 } tags)
-							throw new InvalidDataException("Options file \"" + RelativeDestinationFile + "\" is missing data");
+						if (tag.GetList<TagCompound>("options") is not { Count: >0 } tags) {
+							MagicStorageMod.Instance.Logger.Warn("Options file \"" + RelativeDestinationFile + "\" was malformed");
+							goto UseDefault;
+						}
 
 						List<OptionDefinition> options = tags.Select(OptionDefinition.DeserializeData).ToList();
 
@@ -199,13 +200,13 @@ namespace MagicStorage.CrossMod.Control {
 						filteringOptions = BuildArray(options.Where(o => o.DefinesFilter), o => o.GetFilterOption().Type, FilteringOptionLoader.TotalCount);
 						unloadedOptions = options.Where(o => !o.Exists).ToList();
 						return;
-					} catch (Exception ex) {
-						MagicStorageMod.Instance.Logger.Warn("Options file \"" + RelativeDestinationFile + "\" was malformed", ex);
+					} catch {
+						MagicStorageMod.Instance.Logger.Warn("Options file \"" + RelativeDestinationFile + "\" was malformed");
 						goto UseDefault;
 					}
 				}
-			} catch (Exception ex) {
-				MagicStorageMod.Instance.Logger.Warn("Options file \"" + RelativeDestinationFile + "\" could not be loaded", ex);
+			} catch {
+				MagicStorageMod.Instance.Logger.Warn("Options file \"" + RelativeDestinationFile + "\" could not be loaded");
 				goto UseDefault;
 			}
 
@@ -229,11 +230,7 @@ namespace MagicStorage.CrossMod.Control {
 				["options"] = options.Select(o => o.SerializeData()).ToList()
 			};
 
-			try {
-				TagIO.ToFile(root, DestinationPath);
-			} catch (Exception ex) {
-				MagicStorageMod.Instance.Logger.Warn("Options file \"" + RelativeDestinationFile + "\" could not be saved", ex);
-			}
+			TagIO.ToFile(root, DestinationPath);
 		}
 
 		/// <summary>

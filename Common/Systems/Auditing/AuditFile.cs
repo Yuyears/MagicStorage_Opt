@@ -1,5 +1,4 @@
-﻿using MagicStorage.Common.Systems.Debugging;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 
@@ -41,57 +40,29 @@ namespace MagicStorage.Common.Systems.Auditing {
 			_lastCount = 0;
 		}
 
-		public static void DeserializeOne(BinaryReader reader, ref AuditFile instance) {
-			bool debug = DebugControls.Get(DebugControls.Names.AuditFile);
-
+		public static void DeserializeOne<T>(BinaryReader reader, ref T instance) where T : AuditFile {
 			try {
-				if (debug) {
-					DebugMessage.BeginReportGroup();
-					DebugMessage.Report(false, "Deserializing player table...");
-					DebugMessage.Indent();
-				}
-
+				NetHelper.Report(false, "[AUDIT]   Deserializing player table...");
 				AuditPlayerTable.DeserializeOne(reader, ref instance._playerTable);
 
-				if (debug) {
-					DebugMessage.EndReportGroup();
-					DebugMessage.BeginReportGroup();
-					DebugMessage.Report(false, "Deserializing item table...");
-					DebugMessage.Indent();
-				}
-
+				NetHelper.Report(false, "[AUDIT]   Deserializing item table...");
 				AuditItemTable.DeserializeOne(reader, ref instance._itemTable);
 
-				if (debug) {
-					DebugMessage.EndReportGroup();
-					DebugMessage.BeginReportGroup();
-					DebugMessage.Report(false, "Deserializing component table...");
-					DebugMessage.Indent();
-				}
-
+				NetHelper.Report(false, "[AUDIT]   Deserializing component table...");
 				AuditComponentTable.DeserializeOne(reader, ref instance._componentTable);
 
 				int count = reader.ReadInt32();
 
-				if (debug) {
-					DebugMessage.EndReportGroup();
-					DebugMessage.BeginReportGroup();
-					DebugMessage.Report(false, "Deserializing {0} audit entries...", count);
-					DebugMessage.Indent();
-				}
+				NetHelper.Report(false, $"[AUDIT]   Deserializing {count} audit entries...");
 
 				instance._entries.Clear();
 				for (int i = 0; i < count; i++) {
 					var entry = instance.DeserializeEntry(reader);
 
-					if (debug)
-						DebugMessage.Report(false, entry.NetRepresentation());
+					NetHelper.Report(false, $"[AUDIT]     {entry.NetRepresentation()}");
 
 					instance._entries.Add(entry);
 				}
-
-				if (debug)
-					DebugMessage.EndReportGroup();
 			} catch (Exception ex) {
 				MagicStorageMod.Instance.Logger.Error("Failed to deserialize audit file", ex);
 				instance._playerTable = new();

@@ -1,8 +1,5 @@
-﻿using MagicStorage.Common;
-using MagicStorage.Common.Systems;
-using MagicStorage.Common.Systems.Debugging;
+﻿using System.Collections.Generic;
 using Microsoft.Xna.Framework;
-using System.Collections.Generic;
 using Terraria;
 using Terraria.DataStructures;
 using Terraria.ID;
@@ -66,87 +63,55 @@ namespace MagicStorage.Components
 
 		public int CanPlace(int i, int j, int type, int style, int direction, int alternative)
 		{
-			// NOTE: Assumes TileObjectData.Origin is (1, 1)
-			Point16 scanOrigin = new Point16(i - 1, j - 1);
+			int count = 0;
+			if (GetTileEntity() is TEStorageCenter)
+				count++;
 
-			TileScanSettings scanSettings = new() {
-				InvokingActor = GetTileEntity(),
-				AllowLocalCenterScanningShortcut = true
-			};
+			Point16 startSearch = new(i - 1, j - 1);
+			HashSet<Point16> explored = new() { startSearch };
+			Queue<Point16> toExplore = new();
+			foreach (Point16 point in TEStorageComponent.AdjacentComponents(startSearch))
+				toExplore.Enqueue(point);
 
-			TileScanResult result = TileNetworkScanner.ScanForStorageCenters(scanOrigin, scanSettings);
-
-			return result == TileScanResult.TooManyCenters ? -1 : (int)result;
-		}
-
-		public override bool CanExplode(int i, int j)
-		{
-			if (Main.tile[i, j].TileFrameX % 36 == 18)
-				i--;
-			if (Main.tile[i, j].TileFrameY % 36 == 18)
-				j--;
-
-			if (GetTileEntity() is not null && !SecuritySystem.CanDestroyTile(i, j))
+			while (toExplore.Count > 0)
 			{
-				// The player causing the explosion shouldn't be allowed to destroy the tile
-
-				using var debugging = DebugMessage.CreateIf(DebugControls.Names.StorageComponentDestruction);
-
-				if (debugging.IsDebugging)
-					debugging.Report(false, "Blocked tile destruction from explosive for {0} at {1}", FullName, new Point16(i, j).DebugString());
-
-				return false;
-			}
-
-			return true;
-		}
-
-		public override void KillTile(int i, int j, ref bool fail, ref bool effectOnly, ref bool noItem)
-		{
-			if (fail || effectOnly)
-				return;
-
-			if (Main.tile[i, j].TileFrameX % 36 == 18)
-				i--;
-			if (Main.tile[i, j].TileFrameY % 36 == 18)
-				j--;
-
-			if (GetTileEntity() is not null)
-			{
-				if (new Point16(i, j).ResolveToTileEntity() is not TEStorageComponent component)
+				Point16 explore = toExplore.Dequeue();
+				if (!explored.Contains(explore) && explore != killTile)
 				{
-					// Entity was deleted, prevent the tile from being destroyed
-					fail = true;
-					effectOnly = true;
-					noItem = true;
+					explored.Add(explore);
+					if (TEStorageCenter.IsStorageCenter(explore))
+					{
+						count++;
+						if (count >= 2)
+							return -1;
+					}
 
-					using var debugging = DebugMessage.CreateIf(DebugControls.Names.StorageComponentDestruction);
-
-					if (debugging.IsDebugging)
-						debugging.Report(false, "Blocked tile destruction for {0} at {1} - reason: missing component entity", FullName, new Point16(i, j).DebugString());
-				}
-				else if (!SecuritySystem.CanDestroyTile(component))
-				{
-					// The player causing the destruction shouldn't be allowed to destroy the tile
-					fail = true;
-					effectOnly = true;
-					noItem = true;
-
-					using var debugging = DebugMessage.CreateIf(DebugControls.Names.StorageComponentDestruction);
-
-					if (debugging.IsDebugging)
-						debugging.Report(false, "Blocked tile destruction for {0} at {1} - reason: inaccessible network", FullName, new Point16(i, j).DebugString());
+					foreach (Point16 point in TEStorageComponent.AdjacentComponents(explore))
+						toExplore.Enqueue(point);
 				}
 			}
+
+			return count;
 		}
 
 		public override void KillMultiTile(int i, int j, int frameX, int frameY)
 		{
-			if (GetTileEntity() is ModTileEntity entity) {
-				// TEStorageComponent.OnKill calls SmartlyDisconnectComponents
-				entity.Kill(i, j);
-			} else
-				TileNetworkScanner.SmartlyDisconnectComponents(new Point16(i, j), TileNetworkScanner.GetLocalNeighbors2x2());
+			killTile = new Point16(i, j);
+			ModTileEntity tileEntity = GetTileEntity();
+			if (tileEntity is not null)
+			{
+				tileEntity.Kill(i, j);
+			}
+			if (Main.netMode == NetmodeID.MultiplayerClient)
+				NetHelper.SendSearchAndRefresh(killTile.X, killTile.Y);
+			else
+			{
+				if (Main.netMode == NetmodeID.MultiplayerClient)
+					NetHelper.SendSearchAndRefresh(killTile.X, killTile.Y);
+				else
+					TEStorageComponent.SearchAndRefreshNetwork(killTile);
+			}
+			killTile = Point16.NegativeOne;
 		}
 
 		public override void MouseOver(int i, int j) {

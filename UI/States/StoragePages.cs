@@ -200,11 +200,7 @@ namespace MagicStorage.UI {
 
 		public override bool IsOptionGeneral(SortingOptionElement element) => false;
 
-		protected override void OnConfigurationClicked(SortingOptionElement element) {
-			var config = MagicStorageMod.Instance.optionsConfig;
-			config.ToggleEnabled(element.option);
-			config.Save();
-		}
+		protected override void OnConfigurationClicked(SortingOptionElement element) => MagicStorageMod.Instance.optionsConfig.ToggleEnabled(element.option);
 
 		public override void UpdateLoaderSelection(int option, bool generalOption) => SortingOptionLoader.Selected = option;
 	}
@@ -232,11 +228,7 @@ namespace MagicStorage.UI {
 
 		public override bool IsOptionGeneral(FilteringOptionElement element) => element.option.IsGeneralFilter;
 
-		protected override void OnConfigurationClicked(FilteringOptionElement element) {
-			var config = MagicStorageMod.Instance.optionsConfig;
-			config.ToggleEnabled(element.option);
-			config.Save();
-		}
+		protected override void OnConfigurationClicked(FilteringOptionElement element) => MagicStorageMod.Instance.optionsConfig.ToggleEnabled(element.option);
 
 		public override void UpdateLoaderSelection(int option, bool generalOption) {
 			if (!generalOption)

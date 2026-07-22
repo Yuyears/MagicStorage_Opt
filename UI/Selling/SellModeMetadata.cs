@@ -1,7 +1,6 @@
 ﻿using Ionic.Zlib;
 using MagicStorage.Common;
 using MagicStorage.Common.IO;
-using MagicStorage.Common.Systems.Debugging;
 using MagicStorage.Components;
 using MagicStorage.Items.ErrorDisplay;
 using MagicStorage.NPCs;
@@ -29,8 +28,6 @@ namespace MagicStorage.UI.Selling {
 
 			private Item _iconicItem;
 
-			internal Item IconicItem => _iconicItem;
-
 			private readonly List<Item> _items = [];
 			public IReadOnlyList<Item> Items => _items.AsReadOnly();
 
@@ -48,13 +45,6 @@ namespace MagicStorage.UI.Selling {
 			}
 
 			public void Add(Item item, ReadOnlySpan<byte> data) {
-				SetupFastFields(item, data);
-
-				_items.Add(item);
-				totalStack += item.stack;
-			}
-
-			private void SetupFastFields(Item item, ReadOnlySpan<byte> data) {
 				if (_fastGetItemType < 0) {
 					_fastGetItemType = item.type;
 					_fastGetItemValue = item.value;
@@ -63,6 +53,9 @@ namespace MagicStorage.UI.Selling {
 
 					_iconicItem = item;
 				}
+
+				_items.Add(item);
+				totalStack += item.stack;
 			}
 
 			public bool Matches(Item item, ReadOnlySpan<byte> itemData) {
@@ -111,7 +104,8 @@ namespace MagicStorage.UI.Selling {
 
 				var item = SaveCompression.LoadItem(reader, readStack: false, readFavorite: true);
 
-				SetupFastFields(item, Utility.ToByteSpanNoCompression(item));
+				// Use Add() to set the fast-get fields
+				Add(item, Utility.ToByteSpanNoCompression(item));
 
 				_items.Clear();
 
@@ -165,25 +159,6 @@ namespace MagicStorage.UI.Selling {
 					sb.Append($"[i/s{silver}:SilverCoin] ");
 				if (copper > 0)
 					sb.Append($"[i/s{copper}:CopperCoin] ");
-
-				if (sb.Length == 0)
-					return "Nothing";
-
-				sb.Length -= 1;
-				return sb.ToString();
-			}
-
-			public string ToDebugString() {
-				StringBuilder sb = new();
-
-				if (platinum > 0)
-					sb.Append($"{platinum}p ");
-				if (gold > 0)
-					sb.Append($"{gold}g ");
-				if (silver > 0)
-					sb.Append($"{silver}s ");
-				if (copper > 0)
-					sb.Append($"{copper}c ");
 
 				if (sb.Length == 0)
 					return "Nothing";
@@ -373,26 +348,12 @@ namespace MagicStorage.UI.Selling {
 			byte[] uncompressedData = ms.ToArray();
 			byte[] compressedData = NetCompression.Compress(uncompressedData, CompressionLevel.BestCompression);
 
-			using var debugging = DebugMessage.CreateIfAll(DebugControls.Names.OutgoingNetcodePackets, DebugControls.Names.SellDuplicatesMenu);
-
-			if (debugging.IsDebugging)
-				debugging.Report(true, "Attempting to write compressed data for Item Selling Mode...");
-
 			// Do not write to the actual writer if the compressed data is too large
-			maximumCapacity -= NetCompression.GetByteSize(compressedData.Length);
-
-			if (compressedData.Length >= maximumCapacity) {
-				if (debugging.IsDebugging)
-					debugging.Report(false, "Failed.  Data size ({0}) exceeded maximum ({1})", compressedData.Length, maximumCapacity);
-
+			if (compressedData.Length >= maximumCapacity)
 				return false;
-			}
 
 			writer.Write7BitEncodedInt(compressedData.Length);
 			writer.Write(compressedData);
-
-			if (debugging.IsDebugging)
-				debugging.Report(false, "Success.  Wrote {0} bytes", compressedData.Length);
 
 			return true;
 		}
@@ -400,17 +361,9 @@ namespace MagicStorage.UI.Selling {
 		internal static void NetReceive(BinaryReader reader) {
 			Clear();
 
-			using var debugging = DebugMessage.ChainIfAll(DebugControls.Names.IncomingNetcodePackets, DebugControls.Names.SellDuplicatesMenu);
-
 			int compressedLength = reader.Read7BitEncodedInt();
 			byte[] compressedData = reader.ReadBytes(compressedLength);
 			byte[] uncompressedData = NetCompression.Decompress(compressedData, CompressionLevel.BestCompression);
-
-			if (debugging.IsDebugging) {
-				debugging
-					.Report(false, "Compressed data length: {0}", compressedLength)
-					.Report(false, "Uncompressed data length: {0}", uncompressedData.Length);
-			}
 
 			using MemoryStream ms = new MemoryStream(uncompressedData);
 			using BinaryReader decompressedReader = new BinaryReader(ms);
@@ -420,39 +373,18 @@ namespace MagicStorage.UI.Selling {
 			// Read the items
 			int itemCount = (int)SelectedItems._countTiers.ReadFrom(bitReader);
 
-			using (var debuggingVerbose = debugging.ChainIf(DebugControls.Names.SellDuplicatesMenuVerbose)) {
-				if (debuggingVerbose.IsDebugging && itemCount > 0) {
-					debuggingVerbose
-						.Report(false, "Read items:")
-						.Indent();
+			for (int i = 0; i < itemCount; i++) {
+				var item = new SelectedItems();
+				item.Read(bitReader);
+
+				if (item.totalStack > 0) {
+					_items.Add(item);
+					Count += item.totalStack;
 				}
-
-				for (int i = 0; i < itemCount; i++) {
-					var item = new SelectedItems();
-					item.Read(bitReader);
-
-					if (item.totalStack > 0) {
-						if (debuggingVerbose.IsDebugging) {
-							debuggingVerbose.Report(false, new NetmodeContextMessage(
-								ChatMessage: Utility.GetItemChatTag(item._fastGetItemType, item.totalStack, item._fastGetPrefix),
-								ConsoleOrLogMessage: Utility.PrefixedItemIdentifierWithStack(item._fastGetItemType, item.totalStack, item._fastGetPrefix)
-							));
-						}
-
-						_items.Add(item);
-						Count += item.totalStack;
-					}
-				}
-			}
-
-			if (debugging.IsDebugging) {
-				debugging
-					.Report(false, "Read item count: {0}", itemCount)
-					.Report(false, "Total item count: {0}", Count);
 			}
 		}
 
-		private static NPC _dummyNPCForShop;
+		private static readonly NPC _dummyNPCForShop = new();
 
 		public static void GetSellValues(Player sellingPlayer, out Coins coins) => GetSellValues(sellingPlayer, out coins, out _, false, null);
 		
@@ -461,27 +393,8 @@ namespace MagicStorage.UI.Selling {
 		private delegate bool GetSellValueDelegate(SelectedItems selectedItems, ref int soldItemCount);
 
 		private static void GetSellValues(Player sellingPlayer, out Coins coins, out int soldItemCount, bool runSellEvents, GetSellValueDelegate checkSellingFunc) {
-			if (_dummyNPCForShop is null) {
-				_dummyNPCForShop = new();
-				_dummyNPCForShop.SetDefaults(ModContent.NPCType<Golem>());
-			}
-
-			using var debugging = DebugMessage.CreateIf(DebugControls.Names.SellDuplicatesMenu);
-
-			if (debugging.IsDebugging) {
-				if (checkSellingFunc is null)
-					debugging.Report(true, "Calculating total sell value for Item Selling Mode...");
-				else
-					debugging.Report(true, "Selling items selected by Item Selling Mode...");
-
-				debugging.Indent();
-			}
-
 			ClampedLongArithmetic sum = 0;
 			soldItemCount = 0;
-			int totalItemCount = 0;
-
-			using var debuggingVerbose = debugging.ChainIf(DebugControls.Names.SellDuplicatesMenuVerbose);
 
 			foreach (var selectedItems in _items) {
 				bool allowed = true;
@@ -494,61 +407,27 @@ namespace MagicStorage.UI.Selling {
 				}
 
 				int sold = selectedItems.totalStack;
+				if (checkSellingFunc is not null && !checkSellingFunc(selectedItems, ref sold))
+					allowed = false;
 
-				totalItemCount += sold;
-
-				if (allowed && checkSellingFunc is not null)
-					allowed = checkSellingFunc(selectedItems, ref sold);
-
-				sold = Math.Min(sold, selectedItems.totalStack);
-
-				if (!allowed) {
-					if (debuggingVerbose.IsDebugging)
-						debugging.Report(false, "Failed to sell item: {0}", Utility.ItemIdentifierWithStack(selectedItems._fastGetItemType, sold));
-
+				if (!allowed)
 					continue;
-				}
 
 				// NOTE: sell value = buy value / 5
-				long value = (long)(selectedItems._fastGetItemValue / 5) * sold;
-				sum += value;
+				sum += (long)(selectedItems._fastGetItemValue / 5) * sold;
 				soldItemCount += sold;
 
 				if (runSellEvents) {
 					foreach (var item in selectedItems.Items)
 						PlayerLoader.PostSellItem(sellingPlayer, _dummyNPCForShop, [], item);
 				}
-
-				if (debuggingVerbose.IsDebugging) {
-					string identifier = Utility.ItemIdentifierWithStack(selectedItems._fastGetItemType, sold);
-					Coins itemValue = new Coins(value);
-
-					debuggingVerbose.Report(false, new NetmodeContextMessage(
-						ChatMessage: new("Item \"{0}\" was sold for {1}", identifier, itemValue.ToChatTags()),
-						ConsoleOrLogMessage: new("Item \"{0}\" was sold for {1}", identifier, itemValue.ToDebugString())
-					));
-				}
 			}
 
 			// ShoppingSettings.PriceAdjustment is meant to be a multiplier to increase costs for worse happiness
 			// Hence, we need to divide instead to make items worth less when happiness is worse
-			double adjustment = 1.0d / GetAutomatonPriceAdjustment(sellingPlayer);
-
-			if (debugging.IsDebugging)
-				debugging.Report(false, "Price adustment: {0:P2}", adjustment);
-
-			sum = (long)(sum * adjustment);
+			sum = (long)(sum / GetAutomatonPriceAdjustment(sellingPlayer));
 
 			coins = new Coins(sum);
-
-			if (debugging.IsDebugging) {
-				debugging
-					.Report(false, "Sold {0} / {1} items", soldItemCount, totalItemCount)
-					.Report(false, new NetmodeContextMessage(
-						ChatMessage: new("Total sell value was {0}", coins.ToChatTags()),
-						ConsoleOrLogMessage: new("Total sell value was {0}", coins.ToDebugString())
-					));
-			}
 		}
 
 		private static double GetAutomatonPriceAdjustment(Player sellingPlayer) {

@@ -1,5 +1,4 @@
 ﻿using MagicStorage.Common.Systems;
-using MagicStorage.Common.Systems.Debugging;
 using MagicStorage.Items;
 using MagicStorage.Stations;
 using Microsoft.Xna.Framework;
@@ -99,11 +98,6 @@ namespace MagicStorage.NPCs {
 		}
 
 		internal static void ReportNewTipUnlocked() {
-			using var debugging = DebugMessage.CreateIf(DebugControls.Names.AutomatonHelpTipUpdate);
-
-			if (debugging.IsDebugging)
-				debugging.Report(true, "Updating Automaton NPC states...");
-
 			foreach (NPC npc in Main.ActiveNPCs) {
 				if (npc.ModNPC is Golem automaton)
 					automaton.TipUnlocked();

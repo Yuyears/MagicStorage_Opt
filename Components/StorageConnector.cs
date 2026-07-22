@@ -1,8 +1,4 @@
 ﻿using System.Collections.Generic;
-using System.Linq;
-using MagicStorage.Common;
-using MagicStorage.Common.Systems;
-using MagicStorage.Common.Systems.Debugging;
 using Microsoft.Xna.Framework;
 using Terraria;
 using Terraria.DataStructures;
@@ -42,29 +38,45 @@ namespace MagicStorage.Components
 
 		public static int CanPlace(int i, int j, int type, int style, int direction, int alternative)
 		{
-			TileScanSettings scanSettings = new() {
-				AllowLocalCenterScanningShortcut = true
-			};
+			int count = 0;
 
-			TileScanResult result = TileNetworkScanner.ScanForStorageCenters(new Point16(i, j), scanSettings);
+			Point16 startSearch = new(i, j);
+			HashSet<Point16> explored = new() { startSearch };
+			Queue<Point16> toExplore = new();
+			foreach (Point16 point in TEStorageComponent.AdjacentComponents(startSearch))
+				toExplore.Enqueue(point);
 
-			return result == TileScanResult.TooManyCenters ? -1 : (int)result;
+			while (toExplore.Count > 0)
+			{
+				Point16 explore = toExplore.Dequeue();
+				if (!explored.Contains(explore) && explore != StorageComponent.killTile)
+				{
+					explored.Add(explore);
+					if (TEStorageCenter.IsStorageCenter(explore))
+					{
+						count++;
+						if (count >= 2)
+							return -1;
+					}
+
+					foreach (Point16 point in TEStorageComponent.AdjacentComponents(explore))
+						toExplore.Enqueue(point);
+				}
+			}
+
+			return count;
 		}
 
 		public static int Hook_AfterPlacement(int i, int j, int type, int style, int direction, int alternative)
 		{
-			// CHANGE: v0.7.1 - placing a connector checks for existing networks instead of forcing the adjacent network to be recalculated
-
 			if (Main.netMode == NetmodeID.MultiplayerClient)
 			{
 				NetMessage.SendTileSquare(Main.myPlayer, i, j, 1, 1);
-				//NetHelper.SendSearchAndRefresh(i, j);
-				NetHelper.SendNetworkConnectionsUpdateOnPlacement(new Point16(i, j));
+				NetHelper.SendSearchAndRefresh(i, j);
 				return 0;
 			}
 
-			//TEStorageComponent.SearchAndRefreshNetwork(new Point16(i, j));
-			TileNetworkScanner.SmartlyConnectAdjacentNetworks(new Point16(i, j));
+			TEStorageComponent.SearchAndRefreshNetwork(new Point16(i, j));
 			return 0;
 		}
 
@@ -85,49 +97,24 @@ namespace MagicStorage.Components
 			return false;
 		}
 
-		private static bool CanMergeWith(int i, int j) {
+		private bool CanMergeWith(int i, int j) {
 			if (!WorldGen.InWorld(i, j))
 				return false;
 
 			Tile tile = Main.tile[i, j];
-			return tile.HasTile && TileLoader.GetTile(tile.TileType) is StorageComponent or StorageConnector;
-		}
-
-		public override bool CanExplode(int i, int j)
-		{
-			bool explodable = TileNetworkScanner.ScanComponents(new Point16(i, j), TileScanSettings.Default).FirstOrDefault() is not TEStorageComponent component || SecuritySystem.CanDestroyTile(component);
-
-			if (!explodable)
-			{
-				using var debugging = DebugMessage.CreateIf(DebugControls.Names.StorageComponentDestruction);
-
-				if (debugging.IsDebugging)
-					debugging.Report(false, "Blocked tile destruction from explosive for {0} at {1}", FullName, new Point16(i, j).DebugString());
-			}
-
-			return explodable;
+			return tile.HasTile && (tile.TileType == Type || TileLoader.GetTile(tile.TileType) is StorageComponent);
 		}
 
 		public override void KillTile(int i, int j, ref bool fail, ref bool effectOnly, ref bool noItem)
 		{
 			if (fail || effectOnly)
 				return;
-
-			if (TileNetworkScanner.ScanComponents(new Point16(i, j), TileScanSettings.Default).FirstOrDefault() is TEStorageComponent component && !SecuritySystem.CanDestroyTile(component))
-			{
-				fail = true;
-				effectOnly = true;
-				noItem = true;
-
-				using var debugging = DebugMessage.CreateIf(DebugControls.Names.StorageComponentDestruction);
-
-				if (debugging.IsDebugging)
-					debugging.Report(false, "Blocked tile destruction for {0} at {1} - reason: inaccessible network", FullName, new Point16(i, j).DebugString());
-			}
+			StorageComponent.killTile = new Point16(i, j);
+			if (Main.netMode == NetmodeID.MultiplayerClient)
+				NetHelper.SendSearchAndRefresh(StorageComponent.killTile.X, StorageComponent.killTile.Y);
 			else
-			{
-				TileNetworkScanner.SmartlyDisconnectComponents(new Point16(i, j), TileNetworkScanner.GetLocalNeighbors1x1());
-			}
+				TEStorageComponent.SearchAndRefreshNetwork(StorageComponent.killTile);
+			StorageComponent.killTile = Point16.NegativeOne;
 		}
 	}
 }

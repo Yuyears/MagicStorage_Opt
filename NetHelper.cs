@@ -169,6 +169,9 @@ namespace MagicStorage
 				case MessageType.PlayerHasServerOp:
 					ReceivePlayerHasOperator(reader);
 					break;
+				case MessageType.ClientRequestPlayerOperatorChange:
+					ServerReceivePlayerOperatorChange(reader, sender);
+					break;
 				case MessageType.ClientRequestPlayerBankDeposit:
 					ServerReceiveDepositFromBankRequest(reader, sender);
 					break;
@@ -223,6 +226,9 @@ namespace MagicStorage
 					break;
 				case MessageType.SecurityPlayerSync:
 					ReceiveSecurityPlayerSync(reader, sender);
+					break;
+				case MessageType.RequestSecurityPlayerSync:
+					ServerReceiveSecurityPlayerSyncRequest(sender);
 					break;
 				case MessageType.StorageHeartNetwork:
 					ReceiveStorageComponentNetwork(reader, sender);
@@ -368,21 +374,16 @@ namespace MagicStorage
 		{
 			Point16 position = new(reader.ReadInt16(), reader.ReadInt16());
 			TEStorageHeart.Operation op = (TEStorageHeart.Operation)reader.ReadByte();
-
-			bool hasContext = reader.ReadSecurityAccess(out var context);
+			using var context = SecuritySystem.CreateAccessContext(sender);
 
 			if (!TileEntity.ByPosition.TryGetValue(position, out TileEntity te) || te is not TEStorageHeart heart)
-				goto cleanupContext;
+				return;
 
 			// NOTE: If not the server, the data will be read but not enqueued
 			heart.QClientOperation(reader, op, sender);
 
 			Report(true, MessageType.ClinetStorageOperation + " packet recieved by client " + Main.myPlayer);
 			Report(false, "Operation: " + op);
-
-cleanupContext:
-			if (hasContext)
-				context.Dispose();
 		}
 
 		public static void ReciveServerStorageResult(BinaryReader reader)
@@ -940,7 +941,6 @@ printReport:
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
 			packet.Write((byte)MessageType.RequestCoinCompact);
 			packet.Write(heart);
-			packet.WriteSecurityAccess();
 			packet.Send();
 
 			Report(true, MessageType.RequestCoinCompact + " packet sent to all clients");
@@ -950,16 +950,12 @@ printReport:
 			Point16 position = reader.ReadPoint16();
 
 			if (Main.netMode == NetmodeID.Server) {
-				bool hasContext = reader.ReadSecurityAccess(out var context);
+				using var context = SecuritySystem.CreateAccessContext(sender);
 
 				if (TileEntity.ByPosition.TryGetValue(position, out var te) && te is TEStorageHeart heart) {
 					heart.CompactCoins();
 					AuditSystem.ReportControlCoinCompacting(sender, heart);
 				}
-
-				if (hasContext)
-					context.Dispose();
-
 				Report(true, MessageType.RequestCoinCompact + " packet received by server from client " + sender);
 				Report(false, "Entity read: (X: " + position.X + ", Y: " + position.Y + ")");
 			} else if (Main.netMode == NetmodeID.MultiplayerClient) {
@@ -1204,7 +1200,7 @@ printReport:
 			Report(false, MessageType.ServerOpConfirmationResult + " packet sent to client " + sender);
 
 			if (valid)
-				AuditSystem.ReportAdministratorStatusAssignment(sender);
+				ServerSetPlayerOperator(sender, hasOp: true, manualOp: true);
 		}
 
 		public static void ClientReceiveOperatorConformationResult(BinaryReader reader) {
@@ -1217,55 +1213,57 @@ printReport:
 
 			Netcode.ClientPrintKeyReponse(valid);
 
-			if (valid) {
-				var mp = Main.LocalPlayer.GetModPlayer<OperatorPlayer>();
-
-				mp.manualOp = mp.hasOp = true;
-
-				ClientSendPlayerHasOp(Main.myPlayer);  // NOTE: Administrators will automatically request the full security network list
-			}
 		}
 
-		public static void ClientSendPlayerHasOp(int plr) {
+		public static void ClientRequestPlayerOperatorChange(int player, bool hasOp) {
 			if (Main.netMode != NetmodeID.MultiplayerClient)
 				return;
 
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
-			packet.Write((byte)MessageType.PlayerHasServerOp);
-			packet.Write((byte)plr);
-
-			var mp = Main.LocalPlayer.GetModPlayer<OperatorPlayer>();
-			BitsByte bb = new(mp.hasOp, mp.manualOp);
-
-			packet.Write(bb);
+			packet.Write((byte)MessageType.ClientRequestPlayerOperatorChange);
+			packet.Write((byte)player);
+			packet.Write(hasOp);
 			packet.Send();
+		}
 
-			Report(true, MessageType.PlayerHasServerOp + " packet sent to the server");
+		public static void ServerReceivePlayerOperatorChange(BinaryReader reader, int sender) {
+			int player = reader.ReadByte();
+			bool hasOp = reader.ReadBoolean();
+
+			if (Main.netMode != NetmodeID.Server
+			|| !Main.player[sender].GetModPlayer<OperatorPlayer>().IsAdministrator
+			|| player < 0 || player >= Main.maxPlayers || !Main.player[player].active)
+				return;
+
+			ServerSetPlayerOperator(player, hasOp, manualOp: false);
 		}
 
 		public static void ReceivePlayerHasOperator(BinaryReader reader) {
 			byte plr = reader.ReadByte();
 			BitsByte opFlags = reader.ReadByte();
+			if (plr >= Main.maxPlayers)
+				return;
 
 			var mp = Main.player[plr].GetModPlayer<OperatorPlayer>();
-
-			bool wasOperator = mp.hasOp, wasAdministrator = mp.IsAdministrator;
 
 			opFlags.Retrieve(ref mp.hasOp, ref mp.manualOp);
 
 			if (Main.netMode == NetmodeID.MultiplayerClient && plr == Main.myPlayer && mp.IsAdministrator)  // Force a sync of the network information
 				RequestAccessibleNetworksByDefault();
 
-			if (Main.netMode != NetmodeID.Server) {
-				Report(true, MessageType.PlayerHasServerOp + " packet received by client " + Main.myPlayer);
+			Report(true, MessageType.PlayerHasServerOp + " packet received by client " + Main.myPlayer);
+		}
+
+		internal static void ServerSetPlayerOperator(int plr, bool hasOp, bool manualOp) {
+			if (Main.netMode != NetmodeID.Server || !InboundPacketGuard.IsValidTransportSender(plr, Main.maxPlayers))
 				return;
-			}
 
-			//Forward the result
-			ModPacket packet = ServerPreparePlayerHasOperatorPacket(plr, mp);
-			packet.Send(ignoreClient: plr);
+			var mp = Main.player[plr].GetModPlayer<OperatorPlayer>();
+			bool wasOperator = mp.hasOp, wasAdministrator = mp.IsAdministrator;
+			mp.hasOp = hasOp;
+			mp.manualOp = manualOp;
 
-			Report(true, MessageType.PlayerHasServerOp + " packet sent to all clients");
+			ServerPreparePlayerHasOperatorPacket(plr, mp).Send();
 
 			if (mp.IsAdministrator != wasAdministrator) {
 				if (mp.IsAdministrator)
@@ -1278,10 +1276,10 @@ printReport:
 			}
 		}
 
-		private static ModPacket ServerPreparePlayerHasOperatorPacket(int plr, OperatorPlayer mp) {
+		internal static ModPacket ServerPreparePlayerHasOperatorPacket(int plr, OperatorPlayer mp) {
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
 			packet.Write((byte)MessageType.PlayerHasServerOp);
-			packet.Write(plr);
+			packet.Write((byte)plr);
 
 			BitsByte bb = new(mp.hasOp, mp.manualOp);
 			packet.Write(bb);
@@ -1420,16 +1418,15 @@ printReport:
 
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
 			packet.Write((byte)msg);
-			packet.Write((byte)Main.myPlayer);
 			packet.Write(heart.Position);
-			packet.Send();
 			packet.Send();
 
 			Report(true, msg + " packet sent to the server");
 		}
 
 		public static void ReceiveStorageHeartUsage(BinaryReader reader, int sender, bool inUse) {
-			byte player = reader.ReadByte();
+			int packetPlayer = Main.netMode == NetmodeID.Server ? -1 : reader.ReadByte();
+			int player = InboundPacketGuard.ResolvePlayer(packetPlayer, sender, Main.netMode);
 			Point16 position = reader.ReadPoint16();
 
 			var msg = inUse ? MessageType.ClientLockStorageHeart : MessageType.ClientUnlockStorageHeart;
@@ -1443,7 +1440,7 @@ printReport:
 				// Forward to other clients
 				ModPacket packet = MagicStorageMod.Instance.GetPacket();
 				packet.Write((byte)msg);
-				packet.Write(player);
+				packet.Write((byte)player);
 				packet.Write(position);
 				packet.Send(ignoreClient: sender);
 
@@ -2023,13 +2020,25 @@ printReport:
 
 		public static void ReceiveSecurityPlayerSync(BinaryReader reader, int sender) {
 			byte plr = reader.ReadByte();
+			if (plr >= Main.maxPlayers)
+				return;
+
 			SecurityPlayer mp = Main.player[plr].GetModPlayer<SecurityPlayer>();
 			mp.ReceiveSync(reader);
+		}
 
-			if (Main.netMode == NetmodeID.Server) {
-				// Forward the result
-				mp.SyncPlayer(-1, sender, false);
+		public static void ServerReceiveSecurityPlayerSyncRequest(int sender) {
+			if (Main.netMode != NetmodeID.Server)
+				return;
+
+			for (int i = 0; i < Main.maxPlayers; i++) {
+				if (i != sender && Main.player[i].active)
+					Main.player[i].GetModPlayer<SecurityPlayer>().SyncPlayer(sender, -1, false);
 			}
+
+			SecurityPlayer player = Main.player[sender].GetModPlayer<SecurityPlayer>();
+			player.SyncPlayer(sender, -1, false);
+			player.SyncPlayer(-1, sender, false);
 		}
 
 		public static void SyncStorageComponentNetwork(TEStorageComponent component) {
@@ -2262,7 +2271,11 @@ printReport:
 		}
 
 		public static void ReceivePityDropsPlayerSync(BinaryReader reader, int sender) {
-			byte plr = reader.ReadByte();
+			int packetPlayer = reader.ReadByte();
+			int plr = InboundPacketGuard.ResolvePlayer(packetPlayer, sender, Main.netMode);
+			if (plr < 0 || plr >= Main.maxPlayers)
+				return;
+
 			PityLootDrops mp = Main.player[plr].GetModPlayer<PityLootDrops>();
 			mp.ReceiveSync(reader);
 
@@ -2423,6 +2436,8 @@ printReport:
 		SyncPityDropsPlayer,
 		ClientRequestDepositHistoryChunks,
 		ServerResponseDepositHistoryChunks,
-		UpdateDepositHistory
+		UpdateDepositHistory,
+		ClientRequestPlayerOperatorChange,
+		RequestSecurityPlayerSync
 	}
 }

@@ -16,18 +16,16 @@ namespace MagicStorage.Common.Players {
 		}
 
 		public override void PreUpdate() {
-			if (MagicStorageServerConfig.GiveLocalHostAdminOnJoin) {
-				// Normally, this code would go in OnEnterWorld, but the client doesn't have the necessary info
+			if (Main.netMode == NetmodeID.Server && MagicStorageServerConfig.GiveLocalHostAdminOnJoin) {
 				int whoAmI = Player.whoAmI;
-				if (Main.netMode != NetmodeID.SinglePlayer && !hasOp && Main.countsAsHostForGameplay[whoAmI]) {
-					// Grant "Server Admin" to the local host
-					hasOp = true;
-					manualOp = true;
-
-					if (whoAmI == Main.myPlayer)
-						NetHelper.ClientSendPlayerHasOp(whoAmI);
-				}
+				if (!hasOp && Main.countsAsHostForGameplay[whoAmI])
+					NetHelper.ServerSetPlayerOperator(whoAmI, hasOp: true, manualOp: true);
 			}
+		}
+
+		public override void SyncPlayer(int toWho, int fromWho, bool newPlayer) {
+			if (Main.netMode == NetmodeID.Server)
+				NetHelper.ServerPreparePlayerHasOperatorPacket(Player.whoAmI, this).Send(toWho, fromWho);
 		}
 	}
 }

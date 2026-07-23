@@ -2,7 +2,10 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using Terraria;
+using Terraria.ID;
 using Terraria.ModLoader;
 using Terraria.ModLoader.IO;
 
@@ -68,6 +71,22 @@ namespace MagicStorage.Common.Players {
 		// Netcode methods
 
 		public override void SyncPlayer(int toWho, int fromWho, bool newPlayer) {
+			if (Main.netMode == NetmodeID.MultiplayerClient) {
+				if (newPlayer) {
+					ModPacket request = Mod.GetPacket();
+					request.Write((byte)MessageType.RequestSecurityPlayerSync);
+					request.Send();
+				}
+
+				return;
+			}
+
+			if (Main.netMode != NetmodeID.Server)
+				return;
+
+			string remoteIdentifier = Netplay.Clients[Player.whoAmI].Socket?.GetRemoteAddress()?.GetIdentifier() ?? $"slot:{Player.whoAmI}";
+			UniqueID = CreateServerIdentity(remoteIdentifier, Player.name);
+
 			ModPacket packet = Mod.GetPacket();
 			packet.Write((byte)MessageType.SecurityPlayerSync);
 			packet.Write((byte)Player.whoAmI);
@@ -76,7 +95,14 @@ namespace MagicStorage.Common.Players {
 		}
 
 		internal void ReceiveSync(BinaryReader reader) {
-			UniqueID = new Guid(reader.ReadBytes(16));
+			byte[] bytes = reader.ReadBytes(16);
+			if (bytes.Length == 16)
+				UniqueID = new Guid(bytes);
+		}
+
+		internal static Guid CreateServerIdentity(string remoteIdentifier, string playerName) {
+			byte[] source = Encoding.UTF8.GetBytes($"MagicStorage.SecurityPlayer.v1\0{remoteIdentifier}\0{playerName}");
+			return new Guid(SHA256.HashData(source).AsSpan(0, 16));
 		}
 
 		public override void CopyClientState(ModPlayer targetCopy) {
@@ -84,10 +110,6 @@ namespace MagicStorage.Common.Players {
 			mp.UniqueID = UniqueID;
 		}
 
-		public override void SendClientChanges(ModPlayer clientPlayer) {
-			SecurityPlayer mp = (SecurityPlayer)clientPlayer;
-			if (mp.UniqueID != UniqueID)
-				SyncPlayer(-1, Main.myPlayer, false);
-		}
+		public override void SendClientChanges(ModPlayer clientPlayer) { }
 	}
 }

@@ -81,10 +81,7 @@ namespace MagicStorage.Common.Commands {
 				return;
 			}
 
-			mp.hasOp = GivesOperatorStatus;
-			mp.manualOp = false;
-
-			NetHelper.ClientSendPlayerHasOp(client);
+			NetHelper.ClientRequestPlayerOperatorChange(client, GivesOperatorStatus);
 
 			Netcode.ClientPrintKeyReponse(valid: true);
 		}

@@ -1,4 +1,5 @@
 using System;
+using MagicStorage.Common.Players;
 using MagicStorage.Common.Systems;
 using Microsoft.Xna.Framework;
 using Terraria;
@@ -25,6 +26,13 @@ namespace MagicStorage.Common.Commands {
 			}
 
 			Require(!InboundPacketGuard.IsDirectionAllowed((MessageType)byte.MaxValue, NetmodeID.Server), "Unknown packet type was accepted.");
+			Require(!InboundPacketGuard.IsDirectionAllowed(MessageType.PlayerHasServerOp, NetmodeID.Server), "Client-authored operator state was accepted.");
+			Require(!InboundPacketGuard.IsDirectionAllowed(MessageType.SecurityPlayerSync, NetmodeID.Server), "Client-authored security identity was accepted.");
+			Require(InboundPacketGuard.ResolvePlayer(7, 3, NetmodeID.Server) == 3, "Server trusted a packet player instead of transport sender.");
+			Require(InboundPacketGuard.ResolvePlayer(7, 3, NetmodeID.MultiplayerClient) == 7, "Client discarded the authoritative server player.");
+			Guid identity = SecurityPlayer.CreateServerIdentity("Steam:123", "Player");
+			Require(identity == SecurityPlayer.CreateServerIdentity("Steam:123", "Player"), "Server security identity was not stable.");
+			Require(identity != SecurityPlayer.CreateServerIdentity("Steam:456", "Player"), "Different transports shared a security identity.");
 			Require(!InboundPacketGuard.IsValidTransportSender(-1, Main.maxPlayers), "Negative transport sender was accepted.");
 			Require(!InboundPacketGuard.IsValidTransportSender(Main.maxPlayers, Main.maxPlayers), "Out-of-range transport sender was accepted.");
 			Require(InboundPacketGuard.IsValidTransportSender(0, Main.maxPlayers), "Valid transport sender was rejected before player activation.");
@@ -35,7 +43,7 @@ namespace MagicStorage.Common.Commands {
 			Require(InboundPacketGuard.IsValidCount(InboundPacketGuard.MaxItemEntries, InboundPacketGuard.MaxItemEntries), "Maximum item count was rejected.");
 			Require(!InboundPacketGuard.IsValidCount(-1, InboundPacketGuard.MaxItemEntries), "Negative item count was accepted.");
 			Require(!InboundPacketGuard.IsValidCount(InboundPacketGuard.MaxItemEntries + 1, InboundPacketGuard.MaxItemEntries), "Oversized item count was accepted.");
-			Require(InboundPacketGuard.IsWithinTileRange(new Point(10, 10), new Point16(15, 16), 5, 5), "Inclusive interaction boundary was rejected.");
+			Require(InboundPacketGuard.IsWithinTileRange(new Point(10, 10), new Point16(15, 15), 5, 5), "Inclusive interaction boundary was rejected.");
 			Require(!InboundPacketGuard.IsWithinTileRange(new Point(10, 10), new Point16(17, 10), 5, 5), "Out-of-range interaction was accepted.");
 
 			caller.Reply($"Network policy verification passed: {Enum.GetValues<MessageType>().Length} message types covered.", Color.LightGreen);

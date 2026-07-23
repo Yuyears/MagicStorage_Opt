@@ -416,7 +416,6 @@ namespace MagicStorage.Components
 			packet.Write(Position.X);
 			packet.Write(Position.Y);
 			packet.Write((byte)op);
-			packet.WriteSecurityAccess();
 
 			return packet;
 		}

@@ -34,6 +34,8 @@ namespace MagicStorage.Common.Systems {
 			or MessageType.RequestStorageUnitStyle
 			or MessageType.ClientRequestServerOp
 			or MessageType.ClientRequestServerOpConfirmation
+			or MessageType.ClientRequestPlayerOperatorChange
+			or MessageType.RequestSecurityPlayerSync
 			or MessageType.ClientRequestPlayerBankDeposit
 			or MessageType.ComponentPlacement
 			or MessageType.ComponentDestruction
@@ -53,13 +55,14 @@ namespace MagicStorage.Common.Systems {
 			or MessageType.GolemHelpTextUpdate
 			or MessageType.ServerOpResponse
 			or MessageType.ServerOpConfirmationResult
+			or MessageType.PlayerHasServerOp
+			or MessageType.SecurityPlayerSync
 			or MessageType.PlayerBankDepositResult
 			or MessageType.StorageHeartNetwork
 			or MessageType.ServerResponseDepositHistoryChunks
 			or MessageType.UpdateDepositHistory => PacketDirection.ServerToClient,
 
 			MessageType.ForceCraftingGUIRefresh
-			or MessageType.PlayerHasServerOp
 			or MessageType.ClientLockStorageHeart
 			or MessageType.ClientUnlockStorageHeart
 			or MessageType.RenameStorageHeart
@@ -70,7 +73,6 @@ namespace MagicStorage.Common.Systems {
 			or MessageType.SecurityNetworkAccessible
 			or MessageType.SecurityNetworkModification
 			or MessageType.RequestSecurityNetworkList
-			or MessageType.SecurityPlayerSync
 			or MessageType.StorageHeartNetworkAssignment
 			or MessageType.DefaultAccessibleNetworks
 			or MessageType.SecurityNetworkPassword
@@ -107,6 +109,9 @@ namespace MagicStorage.Common.Systems {
 		}
 
 		internal static bool IsValidTransportSender(int sender, int maxPlayers) => sender >= 0 && sender < maxPlayers;
+
+		internal static int ResolvePlayer(int packetPlayer, int sender, int netMode)
+			=> netMode == NetmodeID.Server ? sender : packetPlayer;
 
 		internal static bool IsValidSender(int sender, int maxPlayers, bool active) => IsValidTransportSender(sender, maxPlayers) && active;
 

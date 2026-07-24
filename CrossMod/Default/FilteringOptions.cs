@@ -163,6 +163,7 @@ namespace MagicStorage.CrossMod {
 	public sealed class FilterArmorAndEquips : FilteringOption {
 		public override ItemFilter.Filter Filter => ItemFilter.ArmorAndEquipment;
 
+		// Legacy resource identifier retained for compatibility with existing texture references.
 		public override string Texture => "MagicStorage/Assets/FilterAmorAndEquips";
 
 		public override string Name => "ArmorAndEquips";

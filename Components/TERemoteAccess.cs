@@ -67,14 +67,19 @@ namespace MagicStorage.Components
 				return false;
 			}
 
+			if (Main.netMode == Terraria.ID.NetmodeID.MultiplayerClient)
+			{
+				NetHelper.RequestRemoteAccessLink(Position, toLocate);
+				message = Language.GetTextValue("Mods.MagicStorage.RemoteAccessSuccess");
+				return true;
+			}
+
 			// TODO: check if assigning, loading and using Remote Accesses still works with the new system
 
 			heart.ComponentManager.Link(this);
 
 			message = Language.GetTextValue("Mods.MagicStorage.RemoteAccessSuccess");
 			locator = toLocate;
-			NetHelper.ClientSendTEUpdate(Position);
-			NetHelper.ClientSendTEUpdate(toLocate);
 			return true;
 		}
 

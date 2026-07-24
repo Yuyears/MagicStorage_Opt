@@ -9,7 +9,9 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 
 		public readonly RecipeInfo info;
 
-		internal bool DependenciesInitialized { get; private set; }
+		private volatile bool dependenciesInitialized;
+
+		internal bool DependenciesInitialized => dependenciesInitialized;
 
 		internal int[] DependencyRecipeIndexes { get; private set; } = [];
 
@@ -28,14 +30,14 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 					return;
 
 				DependencyRecipeIndexes = [.. indexes];
-				DependenciesInitialized = true;
+				dependenciesInitialized = true;
 			}
 		}
 
 		internal void ClearTrees() {
 			info.ClearTrees();
 			DependencyRecipeIndexes = [];
-			DependenciesInitialized = false;
+			dependenciesInitialized = false;
 		}
 	}
 }

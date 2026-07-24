@@ -20,6 +20,11 @@ namespace MagicStorage {
 
 			NetHelper.Report(true, "Calculating maximum amount to craft for current recipe...");
 
+			if (recipe.createItem.maxStack == 1) {
+				maxCrafts = IsAvailable(thread, recipe) ? 1 : 0;
+				goto ReportAndReturn;
+			}
+
 			if (MagicStorageConfig.IsRecursionEnabled && recipe.TryGetRecursiveRecipe(out RecursiveRecipe recursiveRecipe)) {
 				NetHelper.Report(false, "Recipe had a recursion tree");
 
@@ -70,41 +75,18 @@ namespace MagicStorage {
 				goto ReportAndReturn;
 			}
 
-			int resultItem = recipe.createItem.type;
 			int resultStack = recipe.createItem.stack;
-
-			int maxAllowedBatches = (int)(Utility.CeilingMultiple(9999u, (uint)resultStack) / (uint)resultStack);
-
-			foreach (Item ingredient in recipe.requiredItem) {
-				int stackConsumedPerCraft = ingredient.stack;
-
-				if (ingredient.type == resultItem) {
-					// Crafting the recipe would "undo" part or all of the ingredient consumption
-					stackConsumedPerCraft -= resultStack;
-				}
-
-				if (stackConsumedPerCraft <= 0) {
-					// Ingredient has a net zero or net gain after crafting the recipe
-					continue;
-				}
-
-				if (!TryGetIngredientQuantity(recipe, storageQuantity, infiniteItems, ingredient.type, out int availableQuantity)) {
-					// Ingredient has an infinite quantity
-					continue;
-				}
-
-				// I don't quite know why this algorithm works, but it just does
-				int possibleBatches = (availableQuantity - ingredient.stack) / stackConsumedPerCraft + 1;
-
-				maxAllowedBatches = int.Min(maxAllowedBatches, possibleBatches);
-
-				if (maxAllowedBatches <= 0) {
-					maxCrafts = 0;
-					goto ReportAndReturn;
-				}
+			int low = 0;
+			int high = (int)(Utility.CeilingMultiple(9999u, (uint)resultStack) / (uint)resultStack);
+			while (low < high) {
+				int middle = low + (high - low + 1) / 2;
+				if (CanReserveRecipeBatches(recipe, storageQuantity, infiniteItems, middle))
+					low = middle;
+				else
+					high = middle - 1;
 			}
 
-			maxCrafts = int.Max(0, maxAllowedBatches * resultStack);
+			maxCrafts = low * resultStack;
 
 			ReportAndReturn:
 

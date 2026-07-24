@@ -734,9 +734,9 @@ namespace MagicStorage.Components
 					else
 					{
 						if (Main.netMode != NetmodeID.Server)
-							Main.NewText($"NetRecive Bad OP: {netOp}", Microsoft.Xna.Framework.Color.Red);
+							Main.NewText($"NetReceive Bad OP: {netOp}", Microsoft.Xna.Framework.Color.Red);
 						else
-							Utility.WriteLineColoredSafely($"NetRecive Bad OP: {netOp}", ConsoleColor.Red, ConsoleColor.Black);
+							Utility.WriteLineColoredSafely($"NetReceive Bad OP: {netOp}", ConsoleColor.Red, ConsoleColor.Black);
 					}
 				}
 

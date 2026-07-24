@@ -6,7 +6,7 @@ using Terraria;
 
 namespace MagicStorage {
 	partial class StorageGUI {
-		private class StorageRefreshThread : RefreshThread, IStorageItemsPovider {
+		private class StorageRefreshThread : RefreshThread, IStorageItemsProvider {
 			public readonly HashSet<int> targetItemTypes;
 			public bool uniqueSlotPerItemStack;
 

@@ -18,22 +18,14 @@ namespace MagicStorage {
 	partial class CraftingGUI {
 		private class RecipeWatchTarget : IRefreshUIWatchTarget_2 {
 			private readonly Recipe _recipe;
+			private readonly Condition _condition;
 
-			public RecipeWatchTarget(Recipe recipe) {
+			public RecipeWatchTarget(Recipe recipe, Condition condition) {
 				_recipe = recipe;
+				_condition = condition;
 			}
 
-			public bool GetCurrentState() {
-				// Any ingredient or station change will cause a UI refresh, so only the conditions need to be checked
-				IEnumerable<Condition> conditions = GetRecipeListConditionsToWatch(_recipe) ?? _recipe.Conditions;
-				foreach (var condition in conditions) {
-					if (!condition.IsMet())
-						return false;
-				}
-
-				// Either all relevant conditions are met, or there are no conditions.
-				return true;
-			}
+			public bool GetCurrentState() => _condition.IsMet();
 
 			public void OnStateChange(bool currentState) {
 				RecipeSnapshots.ClearCachedConditions();
@@ -76,10 +68,25 @@ namespace MagicStorage {
 
 			MagicUI.ClearRefreshWatchdogs();
 
+			Dictionary<Recipe, HashSet<Condition>> watchedConditions = new(ReferenceEqualityComparer.Instance);
+			void WatchRecipeConditions(Recipe recipe) {
+				IEnumerable<Condition> conditions = GetRecipeListConditionsToWatch(recipe) ?? recipe.Conditions;
+				if (!watchedConditions.TryGetValue(recipe, out var watched))
+					watchedConditions[recipe] = watched = new(ReferenceEqualityComparer.Instance);
+
+				foreach (Condition condition in conditions) {
+					if (watched.Add(condition))
+						MagicUI.AddRefreshWatchdog(new RecipeWatchTarget(recipe, condition));
+				}
+			}
+
 			foreach (var (recipe, available) in thread.MainZoneObjectsResults.Enumerate()) {
 				if (ShouldWatchRecipeConditions(recipe))
-					MagicUI.AddRefreshWatchdog(new RecipeWatchTarget(recipe));
+					WatchRecipeConditions(recipe);
 			}
+
+			foreach (Recipe recipe in GetRecipesWithListConditionsToWatch())
+				WatchRecipeConditions(recipe);
 
 			NetHelper.Report(false, "Visible recipes: " + thread.MainZoneObjectsResults.objects.Count);
 			NetHelper.Report(false, "Available recipes: " + thread.MainZoneObjectsResults.objectIsAvailable.Count(static b => b));
@@ -205,12 +212,12 @@ namespace MagicStorage {
 				NetHelper.Report(true, "Filtering out only available recipes...");
 
 				foreach (var (recipe, availability) in EvaluateRecipeListAvailability(thread, sortedAndFilteredRecipes)) {
+					RememberRecipeListExactAvailability(recipe, availability);
 					if (!availability.IsAvailable)
 						continue;
 
 					destination.Add(recipe);
 					destinationAvailable.Add(true);
-					RememberRecipeListExactAvailability(recipe, availability);
 				}
 			} else {
 				NetHelper.Report(true, "Checking all recipes for availability...");
@@ -239,21 +246,19 @@ namespace MagicStorage {
 		{
 			var results = new (Recipe Recipe, RecipeListAvailabilityResult Availability)[sortedAndFilteredRecipes.Count];
 			var options = new ParallelOptions {
-				CancellationToken = thread.cancellationToken,
 				MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount - 1, 1, RecipeAvailabilityParallelismLimit)
 			};
 
-			try {
-				Parallel.For(0, sortedAndFilteredRecipes.Count, options, index => {
-					options.CancellationToken.ThrowIfCancellationRequested();
+			Parallel.For(0, sortedAndFilteredRecipes.Count, options, (index, state) => {
+				if (thread.cancellationToken.IsCancellationRequested) {
+					state.Stop();
+					return;
+				}
 
-					Recipe recipe = sortedAndFilteredRecipes[index];
-					results[index] = (recipe, IsAvailableForRecipeList(thread, recipe));
-					thread.CompleteOne();
-				});
-			} catch (Exception ex) when (RefreshThread.IsCancellationException(ex)) {
-				throw new OperationCanceledException("Recipe availability evaluation was cancelled.", ex, thread.cancellationToken);
-			}
+				Recipe recipe = sortedAndFilteredRecipes[index];
+				results[index] = (recipe, IsAvailableForRecipeList(thread, recipe));
+				thread.CompleteOne();
+			});
 
 			return results;
 		}
@@ -282,6 +287,11 @@ namespace MagicStorage {
 			}
 
 			return null;
+		}
+
+		private static Recipe[] GetRecipesWithListConditionsToWatch() {
+			lock (recipeListConditionWatchLock)
+				return [.. recipeListConditionWatchLookup.Keys];
 		}
 
 		private static void ClearRecipeListConditionsToWatch() {

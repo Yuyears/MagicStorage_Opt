@@ -81,13 +81,17 @@ namespace MagicStorage {
 
 		internal static bool IsItemValidForStorage(Item item, int selectedItem) => item.type == selectedItem && item.stack > 0;
 
-		internal static bool IsItemValidForResult(Item item) => IsItemValidForResult(item, selectedItem, MagicCache.ShimmerInfos[selectedItem].GetShimmerReports().OfType<ItemReport>());
+		internal static bool IsItemValidForResult(Item item) => IsItemValidForResult(item.type);
 
-		private static bool IsItemValidForResult(Item item, int selectedItem, IEnumerable<ItemReport> cachedShimmerReports) {
+		internal static bool IsItemValidForResult(int itemType) => IsItemValidForResult(itemType, selectedItem, MagicCache.ShimmerInfos[selectedItem].GetShimmerReports().OfType<ItemReport>());
+
+		private static bool IsItemValidForResult(Item item, int selectedItem, IEnumerable<ItemReport> cachedShimmerReports) => IsItemValidForResult(item.type, selectedItem, cachedShimmerReports);
+
+		private static bool IsItemValidForResult(int itemType, int selectedItem, IEnumerable<ItemReport> cachedShimmerReports) {
 			if (selectedItem == -1)
 				return false;
 
-			IShimmerResultReport report = new ItemReport(item.type);
+			IShimmerResultReport report = new ItemReport(itemType);
 
 			foreach (var cachedReport in cachedShimmerReports) {
 				if (cachedReport.Equals(report))

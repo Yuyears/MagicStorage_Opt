@@ -60,11 +60,11 @@ namespace MagicStorage {
 
 			ref string error = ref thread.storedItemsError;
 
-			var resultItemGroups = thread.ProcessedStorageItems.resultItemGroups.Value;
+			var unfilteredItems = thread.ProcessedStorageItems.unfilteredItems.Value;
 
 			if (!MagicStorageConfig.IsRecursionEnabled || !selection.TryGetRecursiveRecipe(out var recursiveRecipe)) {
 				// Show the information for the recipe that was selected
-				RefreshStorageItems_CheckNormalRecipe(thread, selection, resultItemGroups);
+				RefreshStorageItems_CheckNormalRecipe(thread, selection, unfilteredItems);
 
 				if (MagicStorageConfig.IsRecursionEnabled)
 					error = Language.GetTextValue("Mods.MagicStorage.CraftingGUI.RecursionErrors.NoRecipe");
@@ -74,20 +74,28 @@ namespace MagicStorage {
 					int amountToCraft = thread.CraftingObject.craftAmountTarget.Value;
 					var context = CreateCraftingSimulationContext(thread, amountToCraft);
 					CraftingSimulation simulation = CreateCraftingSimulation(thread, recursiveRecipe, amountToCraft, GetCurrentInventory(thread), context);
+					if (simulation.AmountCrafted <= 0 && amountToCraft > 1) {
+						context = CreateCraftingSimulationContext(thread, 1);
+						simulation = CreateCraftingSimulation(thread, recursiveRecipe, 1, GetCurrentInventory(thread), context);
+					}
 
 					thread.RecipeSimulations.currentRecipeSimulation.Value = simulation;
 
 					if (simulation.AmountCrafted > 0) {
 						error = null;
-						RefreshStorageItems_CheckRecursionRecipes(thread, selection, resultItemGroups, simulation.UsedRecipes);
+						RefreshStorageItems_CheckRecursionRecipes(thread, selection, unfilteredItems, simulation.UsedRecipes);
 					} else {
 						// Show the information for ALL possible recipes in the tree
-						RefreshStorageItems_CheckRecursionRecipes(thread, selection, resultItemGroups, selection.GetRecursiveRecipe().GetCraftingTree(cancellationToken: thread.cancellationToken).GetAllRecipes(thread.cancellationToken));
+						RefreshStorageItems_CheckRecursionRecipes(thread, selection, unfilteredItems, selection.GetRecursiveRecipe().GetCraftingTree(cancellationToken: thread.cancellationToken).GetAllRecipes(thread.cancellationToken));
 					}
 				} else {
 					int amountToCraft = thread.CraftingObject.craftAmountTarget.Value;
 					var context = CreateCraftingSimulationContext(thread, amountToCraft);
 					CraftingSimulation simulation = CreateCraftingSimulation(thread, recursiveRecipe, amountToCraft, GetCurrentInventory(thread), context);
+					if (simulation.AmountCrafted <= 0 && amountToCraft > 1) {
+						context = CreateCraftingSimulationContext(thread, 1);
+						simulation = CreateCraftingSimulation(thread, recursiveRecipe, 1, GetCurrentInventory(thread), context);
+					}
 
 					thread.RecipeSimulations.currentRecipeSimulation.Value = simulation;
 
@@ -95,10 +103,10 @@ namespace MagicStorage {
 						error = null;
 
 						// Show the information for the materials that the exact simulation actually needs.
-						RefreshStorageItems_CheckRequiredMaterials(thread, selection, resultItemGroups, simulation.RequiredMaterials);
+						RefreshStorageItems_CheckRequiredMaterials(thread, selection, unfilteredItems, simulation.RequiredMaterials);
 					} else {
 						// Show the information for the highest recipe in the tree, since the simulation failed
-						RefreshStorageItems_CheckNormalRecipe(thread, selection, resultItemGroups);
+						RefreshStorageItems_CheckNormalRecipe(thread, selection, unfilteredItems);
 
 						error = Language.GetTextValue("Mods.MagicStorage.CraftingGUI.RecursionErrors.NoIngredients");
 					}
@@ -110,20 +118,23 @@ namespace MagicStorage {
 			NetHelper.Report(true, $"Success! Found {thread.RecipeItems.GetItemCountsReport()}");
 		}
 
-		private static void RefreshStorageItems_CheckNormalRecipe<T>(T thread, Recipe recipe, List<List<Item>> resultItemGroups)
+		private static void RefreshStorageItems_CheckNormalRecipe<T>(T thread, Recipe recipe, List<Item> unfilteredItems)
 			where T : RefreshThread, IRecipeItemsProvider
 		{
 			NetHelper.Report(false, "Recursion was disabled or recipe did not have a recursive recipe");
 
-			thread.InitTaskSchedule(resultItemGroups.Count, "Populating Stored Ingredients");
+			thread.InitTaskSchedule(unfilteredItems.Count, "Populating Stored Ingredients");
 
 			var handler = thread.RecipeItems;
 
-			foreach (var items in resultItemGroups.NotifyStepsTo(thread).WatchForCancellation(thread, 16))
-				CheckStorageItemsForRecipe(recipe, handler, items, null, checkResultItem: true);
+			foreach (Item item in unfilteredItems.NotifyStepsTo(thread).WatchForCancellation(thread, 16)) {
+				CheckItemFromSource(handler, item, recipe, IsItemValidForRecipe);
+				if (item.type == recipe.createItem.type)
+					handler.SetResultItem(item);
+			}
 		}
 
-		private static void RefreshStorageItems_CheckRecursionRecipes<T>(T thread, Recipe mainRecipe, List<List<Item>> resultGroups, IEnumerable<Recipe> recipes)
+		private static void RefreshStorageItems_CheckRecursionRecipes<T>(T thread, Recipe mainRecipe, List<Item> unfilteredItems, IEnumerable<Recipe> recipes)
 			where T : RefreshThread, IRecipeItemsProvider
 		{
 			NetHelper.Report(false, "Recipe had a recursive recipe, processing recursion tree...");
@@ -132,40 +143,36 @@ namespace MagicStorage {
 			List<Recipe> usedRecipes = recipes.ToList();
 			HashSet<int> validIngredientTypes = BuildValidIngredientTypeSet(usedRecipes);
 
-			thread.InitTaskSchedule(resultGroups.Count, "Populating Stored Ingredients");
+			thread.InitTaskSchedule(unfilteredItems.Count, "Populating Stored Ingredients");
 
 			var handler = thread.RecipeItems;
 
-			foreach (List<Item> itemsFromSource in resultGroups.NotifyStepsTo(thread).WatchForCancellation(thread, 16)) {
-				foreach (Item item in itemsFromSource) {
-					if (validIngredientTypes.Contains(item.type))
-						handler.AddStoredIngredient(item);
+			foreach (Item item in unfilteredItems.NotifyStepsTo(thread).WatchForCancellation(thread, 16)) {
+				if (validIngredientTypes.Contains(item.type))
+					handler.AddStoredIngredient(item);
 
-					if (item.type == mainRecipe.createItem.type)
-						handler.SetResultItem(item);
-				}
+				if (item.type == mainRecipe.createItem.type)
+					handler.SetResultItem(item);
 			}
 		}
 
-		private static void RefreshStorageItems_CheckRequiredMaterials<T>(T thread, Recipe mainRecipe, List<List<Item>> resultGroups, IReadOnlyList<RequiredMaterialInfo> materials)
+		private static void RefreshStorageItems_CheckRequiredMaterials<T>(T thread, Recipe mainRecipe, List<Item> unfilteredItems, IReadOnlyList<RequiredMaterialInfo> materials)
 			where T : RefreshThread, IRecipeItemsProvider
 		{
 			NetHelper.Report(false, "Recipe had a recursive recipe, processing simulated required materials...");
 
 			HashSet<int> validIngredientTypes = BuildValidIngredientTypeSet(materials);
 
-			thread.InitTaskSchedule(resultGroups.Count, "Populating Stored Ingredients");
+			thread.InitTaskSchedule(unfilteredItems.Count, "Populating Stored Ingredients");
 
 			var handler = thread.RecipeItems;
 
-			foreach (List<Item> itemsFromSource in resultGroups.NotifyStepsTo(thread).WatchForCancellation(thread, 16)) {
-				foreach (Item item in itemsFromSource) {
-					if (validIngredientTypes.Contains(item.type))
-						handler.AddStoredIngredient(item);
+			foreach (Item item in unfilteredItems.NotifyStepsTo(thread).WatchForCancellation(thread, 16)) {
+				if (validIngredientTypes.Contains(item.type))
+					handler.AddStoredIngredient(item);
 
-					if (item.type == mainRecipe.createItem.type)
-						handler.SetResultItem(item);
-				}
+				if (item.type == mainRecipe.createItem.type)
+					handler.SetResultItem(item);
 			}
 		}
 

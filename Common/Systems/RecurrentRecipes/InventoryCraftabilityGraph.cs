@@ -15,6 +15,7 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 		private readonly Dictionary<int, int> capacities;
 		private readonly Dictionary<int, InventoryCraftabilityNode> nodes;
 		private readonly HashSet<Recipe> candidateRecipes;
+		private readonly HashSet<Recipe> conditionBlockedRecipes;
 		private readonly Dictionary<Recipe, InventoryCraftabilityRecipeProbe> recipeProbesByRecipe;
 		private readonly RecipeIngredientIndex recipeIngredientIndex;
 
@@ -32,6 +33,7 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 			Dictionary<int, int> capacities,
 			Dictionary<int, InventoryCraftabilityNode> nodes,
 			HashSet<Recipe> candidateRecipes,
+			HashSet<Recipe> conditionBlockedRecipes,
 			Dictionary<Recipe, InventoryCraftabilityRecipeProbe> recipeProbesByRecipe,
 			RecipeIngredientIndex recipeIngredientIndex,
 			bool canRejectMissingRecipes,
@@ -40,6 +42,7 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 			this.capacities = capacities;
 			this.nodes = nodes;
 			this.candidateRecipes = candidateRecipes;
+			this.conditionBlockedRecipes = conditionBlockedRecipes;
 			this.recipeProbesByRecipe = recipeProbesByRecipe;
 			this.recipeIngredientIndex = recipeIngredientIndex;
 			CanRejectMissingRecipes = canRejectMissingRecipes;
@@ -133,7 +136,7 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 				solvedRecipes: null,
 				cancellationToken);
 
-			return CreateGraph(capacities, directCapacities, minimumDepths, candidatesByItemType, candidateRecipeSet, recipeIngredientIndex, canRejectMissingRecipes: true, maxDepth);
+			return CreateGraph(capacities, directCapacities, minimumDepths, candidatesByItemType, candidateRecipeSet, CollectConditionBlockedRecipes(available, recipes, cancellationToken), recipeIngredientIndex, canRejectMissingRecipes: true, maxDepth);
 		}
 
 		private static InventoryCraftabilityGraph BuildCore(
@@ -166,7 +169,7 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 			}
 
 			if (available.creativeUnitPresent)
-				return CreateGraph(capacities, directCapacities, minimumDepths, candidatesByItemType, candidateRecipeSet, recipeIngredientIndex, canRejectMissingRecipes, maxDepth);
+				return CreateGraph(capacities, directCapacities, minimumDepths, candidatesByItemType, candidateRecipeSet, CollectConditionBlockedRecipes(available, recipes, cancellationToken), recipeIngredientIndex, canRejectMissingRecipes, maxDepth);
 
 			if (useFullInventoryFrontier)
 				SolveAcyclicStronglyConnectedComponentDag(
@@ -196,7 +199,19 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 				solvedRecipes,
 				cancellationToken);
 
-			return CreateGraph(capacities, directCapacities, minimumDepths, candidatesByItemType, candidateRecipeSet, recipeIngredientIndex, canRejectMissingRecipes, maxDepth);
+			return CreateGraph(capacities, directCapacities, minimumDepths, candidatesByItemType, candidateRecipeSet, CollectConditionBlockedRecipes(available, recipes, cancellationToken), recipeIngredientIndex, canRejectMissingRecipes, maxDepth);
+		}
+
+		private static HashSet<Recipe> CollectConditionBlockedRecipes(AvailableRecipeObjects available, IReadOnlyList<Recipe> recipes, CancellationToken cancellationToken) {
+			HashSet<Recipe> blocked = new(ReferenceEqualityComparer.Instance);
+
+			foreach (Recipe recipe in recipes) {
+				cancellationToken.ThrowIfCancellationRequested();
+				if (recipe is not null && !recipe.Disabled && recipe.Conditions.Count > 0 && !available.IsRecipeAvailable(recipe))
+					blocked.Add(recipe);
+			}
+
+			return blocked;
 		}
 
 		private static void PopulateDirectCapacities(AvailableRecipeObjects available, Dictionary<int, int> capacities, Dictionary<int, int> directCapacities, Dictionary<int, int> minimumDepths, CancellationToken cancellationToken) {
@@ -599,6 +614,64 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 		}
 
 		/// <summary>
+		/// Gets currently failed conditions from child recipes that could satisfy missing dependencies.
+		/// </summary>
+		public Condition[] GetBlockedConditionsForRecipe(Recipe recipe) {
+			if (recipe is null || conditionBlockedRecipes.Count <= 0 || recipeIngredientIndex is null || MaxDepth <= 0)
+				return [];
+
+			HashSet<Condition> conditions = new(ReferenceEqualityComparer.Instance);
+			HashSet<Recipe> visited = new(ReferenceEqualityComparer.Instance) { recipe };
+			CollectBlockedConditions(recipe, depth: 0, visited, conditions);
+			return [.. conditions];
+		}
+
+		private void CollectBlockedConditions(Recipe recipe, int depth, HashSet<Recipe> visited, HashSet<Condition> conditions) {
+			if (depth >= MaxDepth)
+				return;
+
+			foreach (Item ingredient in recipe.requiredItem) {
+				if (GetDirectIngredientQuantity(recipe, ingredient.type) >= ingredient.stack)
+					continue;
+
+				foreach (Recipe producer in recipeIngredientIndex.GetRecipesProducingIngredient(recipe, ingredient.type)) {
+					if (!visited.Add(producer))
+						continue;
+
+					if (conditionBlockedRecipes.Contains(producer))
+						conditions.UnionWith(producer.Conditions);
+
+					CollectBlockedConditions(producer, depth + 1, visited, conditions);
+				}
+			}
+		}
+
+		private int GetDirectIngredientQuantity(Recipe recipe, int ingredientType) {
+			long quantity = 0;
+			bool usesRecipeGroup = false;
+			HashSet<int> acceptedTypes = [];
+
+			foreach (int groupID in recipe.acceptedGroups) {
+				RecipeGroup group = RecipeGroup.recipeGroups[groupID];
+				if (!group.ContainsItem(ingredientType))
+					continue;
+
+				usesRecipeGroup = true;
+				acceptedTypes.UnionWith(group.ValidItems);
+			}
+
+			if (!usesRecipeGroup)
+				acceptedTypes.Add(ingredientType);
+
+			foreach (int itemType in acceptedTypes) {
+				if (nodes.TryGetValue(itemType, out var node))
+					quantity += node.DirectQuantity;
+			}
+
+			return quantity >= int.MaxValue ? int.MaxValue : (int)quantity;
+		}
+
+		/// <summary>
 		/// Attempts to get the graph node for a direct or virtually craftable item type.
 		/// </summary>
 		/// <param name="itemType">The item type to inspect.</param>
@@ -631,6 +704,7 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 			Dictionary<int, int> minimumDepths,
 			Dictionary<int, List<InventoryCraftabilityCandidate>> candidatesByItemType,
 			HashSet<Recipe> candidateRecipeSet,
+			HashSet<Recipe> conditionBlockedRecipes,
 			RecipeIngredientIndex recipeIngredientIndex,
 			bool canRejectMissingRecipes,
 			int maxDepth
@@ -641,6 +715,7 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 				capacities,
 				nodes,
 				candidateRecipeSet,
+				conditionBlockedRecipes,
 				BuildRecipeProbesByRecipe(nodes, candidatesByItemType, recipeIngredientIndex),
 				recipeIngredientIndex,
 				canRejectMissingRecipes,
@@ -701,11 +776,14 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 
 		private static RecipeIngredientIndex BuildRecipesByIngredientType(IReadOnlyList<Recipe> recipes) {
 			Dictionary<int, List<Recipe>> recipesByIngredientType = new();
+			Dictionary<int, List<Recipe>> recipesByResultType = new();
 			List<Recipe> recipesWithoutIngredients = [];
 
 			foreach (Recipe recipe in recipes) {
 				if (recipe is null || recipe.Disabled)
 					continue;
+
+				AddRecipeByIngredientType(recipesByResultType, recipe.createItem.type, recipe);
 
 				if (recipe.requiredItem.Count <= 0) {
 					recipesWithoutIngredients.Add(recipe);
@@ -723,7 +801,7 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 			}
 
 			BuildRecipeStronglyConnectedComponents(recipes, recipesByIngredientType, out var componentsByRecipe, out var componentsInTopologicalOrder);
-			return new RecipeIngredientIndex(recipesByIngredientType, recipesWithoutIngredients, componentsByRecipe, componentsInTopologicalOrder);
+			return new RecipeIngredientIndex(recipesByIngredientType, recipesByResultType, recipesWithoutIngredients, componentsByRecipe, componentsInTopologicalOrder);
 		}
 
 		private static void BuildRecipeStronglyConnectedComponents(
@@ -1145,6 +1223,8 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 		/// </summary>
 		public IReadOnlyDictionary<int, List<Recipe>> RecipesByIngredientType { get; }
 
+		internal IReadOnlyDictionary<int, List<Recipe>> RecipesByResultType { get; }
+
 		/// <summary>
 		/// Gets recipes that have no item ingredients.
 		/// </summary>
@@ -1156,11 +1236,13 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 
 		internal RecipeIngredientIndex(
 			Dictionary<int, List<Recipe>> recipesByIngredientType,
+			Dictionary<int, List<Recipe>> recipesByResultType,
 			List<Recipe> recipesWithoutIngredients,
 			Dictionary<Recipe, RecipeStronglyConnectedComponent> stronglyConnectedComponentsByRecipe,
 			List<RecipeStronglyConnectedComponent> componentsInTopologicalOrder
 		) {
 			RecipesByIngredientType = recipesByIngredientType;
+			RecipesByResultType = recipesByResultType;
 			RecipesWithoutIngredients = recipesWithoutIngredients;
 			this.stronglyConnectedComponentsByRecipe = stronglyConnectedComponentsByRecipe;
 			ComponentsInTopologicalOrder = componentsInTopologicalOrder;
@@ -1184,6 +1266,33 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 				return component.TopologicalOrder;
 
 			return int.MaxValue;
+		}
+
+		internal IEnumerable<Recipe> GetRecipesProducingIngredient(Recipe consumer, int ingredientType) {
+			HashSet<Recipe> yielded = new(ReferenceEqualityComparer.Instance);
+
+			if (RecipesByResultType.TryGetValue(ingredientType, out var directRecipes)) {
+				foreach (Recipe recipe in directRecipes) {
+					if (yielded.Add(recipe))
+						yield return recipe;
+				}
+			}
+
+			foreach (int groupID in consumer.acceptedGroups) {
+				RecipeGroup group = RecipeGroup.recipeGroups[groupID];
+				if (!group.ContainsItem(ingredientType))
+					continue;
+
+				foreach (int itemType in group.ValidItems) {
+					if (!RecipesByResultType.TryGetValue(itemType, out var groupRecipes))
+						continue;
+
+					foreach (Recipe recipe in groupRecipes) {
+						if (yielded.Add(recipe))
+							yield return recipe;
+					}
+				}
+			}
 		}
 	}
 

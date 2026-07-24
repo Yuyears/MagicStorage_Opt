@@ -126,7 +126,10 @@ namespace MagicStorage.CrossMod.Control {
 		/// <summary>
 		/// Toggles whether a sorting option is enabled in configurable button mode.
 		/// </summary>
-		public void ToggleEnabled(SortingOption option) => SetEnabled(option, sortingOptions[option.Type] is null);
+		public void ToggleEnabled(SortingOption option) {
+			SetEnabled(option, sortingOptions[option.Type] is null);
+			Save();
+		}
 
 		/// <summary>
 		/// Sets whether a sorting option is enabled in configurable button mode.
@@ -152,7 +155,10 @@ namespace MagicStorage.CrossMod.Control {
 		/// <summary>
 		/// Toggles whether a filtering option is enabled in configurable button mode.
 		/// </summary>
-		public void ToggleEnabled(FilteringOption option) => SetEnabled(option, filteringOptions[option.Type] is null);
+		public void ToggleEnabled(FilteringOption option) {
+			SetEnabled(option, filteringOptions[option.Type] is null);
+			Save();
+		}
 
 		/// <summary>
 		/// Sets whether a filtering option is enabled in configurable button mode.

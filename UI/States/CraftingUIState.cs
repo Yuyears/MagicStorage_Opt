@@ -59,6 +59,7 @@ namespace MagicStorage.UI.States {
 
 		protected int lastKnownIngredientRows = 1;
 		protected bool lastKnownUseOldCraftButtons = false;
+		protected bool currentRecipeObjectsAvailable = true;
 		protected float lastKnownIngredientScrollBarViewPosition = -1;
 		protected float lastKnownScrollBarViewPosition = -1;
 
@@ -172,9 +173,9 @@ namespace MagicStorage.UI.States {
 			
 			InitializeScrollBar(ingredientZone, ref ingredientScrollBar, ingredientScrollBarMaxViewSize);
 
-			reqObjText.OnUpdate += static e => {
+			reqObjText.OnUpdate += e => {
 				UIText text = e as UIText;
-				if (CraftingGUI.lastKnownRecursionErrorForObjects is { Length: >0 }) {
+				if (!currentRecipeObjectsAvailable) {
 					// Error color
 					text.TextColor = Color.Red;
 				} else {
@@ -228,9 +229,12 @@ namespace MagicStorage.UI.States {
 			
 			InitializeScrollBar(storageZone, ref storageScrollBar, storageScrollBarMaxViewSize);
 
-			storedItemsText.OnUpdate += static e => {
+			storedItemsText.OnUpdate += e => {
 				UIText text = e as UIText;
-				if (CraftingGUI.lastKnownRecursionErrorForStoredItems is { Length: >0 }) {
+				bool missingIngredients = currentRecipeObjectsAvailable
+					&& CraftingGUI.TryGetPublishedCurrentRecipeAvailability(out bool available)
+					&& !available;
+				if (missingIngredients) {
 					// Error color
 					text.TextColor = Color.Red;
 				} else {

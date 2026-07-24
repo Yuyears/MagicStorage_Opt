@@ -46,6 +46,7 @@ namespace MagicStorage {
 
 		public override void Unload()
 		{
+			NetHelper.ClearRecipeTableDigestCache();
 			StorageGUI.Unload();
 			CraftingGUI.Unload();
 			EnvironmentGUI.Unload();

@@ -1,11 +1,14 @@
 ﻿using MagicStorage.Common.Players;
 using MagicStorage.Common.Systems.Auditing;
 using MagicStorage.Components;
+using MagicStorage.Edits;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using Terraria;
 using Terraria.DataStructures;
 using Terraria.ID;
@@ -17,10 +20,15 @@ using Terraria.ModLoader.IO;
 namespace MagicStorage.Common.Systems {
 	public class SecuritySystem : ModSystem {
 		private class Network {
+			private const int PasswordIterations = 100_000;
+			private const int PasswordSaltBytes = 16;
+			private const int PasswordHashBytes = 32;
+
 			public Guid creator = default;
 			internal string creatorNameFallback = null!;
 			public string name = null!;
-			public string? password = null;
+			private byte[]? passwordSalt;
+			private byte[]? passwordHash;
 			public bool restricted;
 			internal int uniqueID;
 
@@ -38,7 +46,10 @@ namespace MagicStorage.Common.Systems {
 				tag["creator"] = creator.ToByteArray();
 				tag["creatorName"] = creatorNameFallback;
 				tag["name"] = name;
-				tag["password"] = password is null ? null : StringScrambling.Scramble(password);
+				if (passwordSalt is not null && passwordHash is not null) {
+					tag["passwordSalt"] = passwordSalt;
+					tag["passwordHash"] = passwordHash;
+				}
 				tag["restricted"] = restricted;
 			}
 
@@ -47,12 +58,43 @@ namespace MagicStorage.Common.Systems {
 				creator = new Guid(tag.GetByteArray("creator"));
 				creatorNameFallback = tag.GetString("creatorName");
 				name = tag.GetString("name");
-				password = tag.ContainsKey("password") ? StringScrambling.Unscramble(tag.GetByteArray("password")) : null;
 				restricted = tag.GetBool("restricted");
 
-				if (password == string.Empty)
-					password = null;
+				if (tag.ContainsKey("passwordSalt") && tag.ContainsKey("passwordHash")) {
+					passwordSalt = tag.GetByteArray("passwordSalt");
+					passwordHash = tag.GetByteArray("passwordHash");
+					if (passwordSalt.Length != PasswordSaltBytes || passwordHash.Length != PasswordHashBytes)
+						throw new InvalidDataException("Security network password verifier has an invalid length.");
+				} else if (tag.ContainsKey("password")) {
+					string legacyPassword = StringScrambling.Unscramble(tag.GetByteArray("password"));
+					SetPassword(string.IsNullOrEmpty(legacyPassword) ? null : legacyPassword);
+				}
 			}
+
+			public void SetPassword(string? password) {
+				if (password is null) {
+					passwordSalt = null;
+					passwordHash = null;
+					return;
+				}
+
+				passwordSalt = RandomNumberGenerator.GetBytes(PasswordSaltBytes);
+				passwordHash = DerivePassword(password, passwordSalt);
+			}
+
+			public bool VerifyPassword(string? password) {
+				if (passwordSalt is null || passwordHash is null)
+					return password is null || password.Length == 0;
+
+				if (password is null)
+					return false;
+
+				byte[] suppliedHash = DerivePassword(password, passwordSalt);
+				return CryptographicOperations.FixedTimeEquals(passwordHash, suppliedHash);
+			}
+
+			private static byte[] DerivePassword(string password, byte[] salt)
+				=> Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(password), salt, PasswordIterations, HashAlgorithmName.SHA256, PasswordHashBytes);
 		}
 
 		public readonly struct NetworkView {
@@ -137,7 +179,6 @@ namespace MagicStorage.Common.Systems {
 
 					foreach (var network in networks) {
 						securityPlayer.JoinNetwork(network.id);
-						securityPlayer.RememberPassword(network.id, network.password);
 					}
 				}
 			}
@@ -183,6 +224,34 @@ namespace MagicStorage.Common.Systems {
 
 		public static bool CanPlayerAccessImmediately(Player player, int networkID)
 			=> !Main.gameMenu && (networkID < 0 || player.GetModPlayer<OperatorPlayer>().hasOp || (player.GetModPlayer<SecurityPlayer>().HasJoinedNetwork(networkID) && NetworkExists(networkID)));
+
+		public static bool CanDestroyTile(int x, int y) => CanDestroyTile(new Point16(x, y));
+
+		public static bool CanDestroyTile(Point16 position) {
+			if (!WorldGen.InWorld(position.X, position.Y))
+				return false;
+
+			Tile tile = Main.tile[position];
+			if (TileLoader.GetTile(tile.TileType) is StorageComponent) {
+				int x = position.X;
+				int y = position.Y;
+				if (tile.TileFrameX % 36 == 18)
+					x--;
+				if (tile.TileFrameY % 36 == 18)
+					y--;
+				position = new Point16(x, y);
+			}
+
+			return position.ResolveToTileEntity() is not TEStorageComponent component || CanDestroyTile(component);
+		}
+
+		internal static bool CanDestroyTile(TEStorageComponent component) {
+			int player = PlayerPickTileListenerDetour.PickTilePlayer;
+			if (player < 0)
+				player = ProjectileExplodeTilesListenerDetours.ExplodeTilesPlayer;
+
+			return player < 0 || player < Main.maxPlayers && CanPlayerAccessImmediately(Main.player[player], component.assignedNetwork);
+		}
 
 		public static void PrintStorageInaccessible() => Main.NewText(Language.GetText("Mods.MagicStorage.Security.EntityNotAccessible"));
 
@@ -277,12 +346,12 @@ namespace MagicStorage.Common.Systems {
 				return NetworkActionResult.NetworkNotFound;
 			}
 
-			if (Main.netMode == NetmodeID.MultiplayerClient) {
-				// Client only remembers the password if they have accessed the network before
+			if (Main.netMode != NetmodeID.Server) {
+				// Clients only retain passwords that were entered locally; servers store verifiers only.
 				SecurityPlayer securityPlayer = Main.LocalPlayer.GetModPlayer<SecurityPlayer>();
 
 				if (securityPlayer.HasJoinedNetwork(id)) {
-					var network = _clientViews[networkIndex];
+					NetworkView network = GetNetwork(id);
 
 					if (!network.restricted) {
 						// Public networks have no password
@@ -303,8 +372,8 @@ namespace MagicStorage.Common.Systems {
 				return NetworkActionResult.UnauthorizedAccess;
 			}
 
-			password = _networks[networkIndex].password;
-			return NetworkActionResult.Success;
+			password = null;
+			return NetworkActionResult.UnauthorizedAccess;
 		}
 
 		public static bool NetworkExists(int id) {
@@ -431,14 +500,16 @@ namespace MagicStorage.Common.Systems {
 
 			int id;
 			string? pwd;
-			_networks.Add(new Network() {
+			Network network = new() {
 				creator = SecurityPlayer.GetLocalID(),
 				creatorNameFallback = Main.LocalPlayer.name,
 				name = name,
-				password = pwd = restricted ? password : null,
 				restricted = restricted,
 				uniqueID = id = ReserveUniqueID()
-			});
+			};
+			pwd = restricted ? password : null;
+			network.SetPassword(pwd);
+			_networks.Add(network);
 
 			var mp = Main.LocalPlayer.GetModPlayer<SecurityPlayer>();
 			mp.JoinNetwork(id);
@@ -469,14 +540,15 @@ namespace MagicStorage.Common.Systems {
 				return NetworkActionResult.EmptyPassword;
 			}
 
-			_networks.Add(new Network() {
+			Network network = new() {
 				creator = SecurityPlayer.GetID(player),
 				creatorNameFallback = plr.name,
 				name = name,
-				password = restricted ? password : string.Empty,
 				restricted = restricted,
 				uniqueID = id = ReserveUniqueID()
-			});
+			};
+			network.SetPassword(restricted ? password : null);
+			_networks.Add(network);
 
 			return NetworkActionResult.Success;
 		}
@@ -520,7 +592,7 @@ namespace MagicStorage.Common.Systems {
 			NetworkActionResult success = NetworkActionResult.Success;
 			if (player.GetModPlayer<OperatorPlayer>().hasOp)
 				success = NetworkActionResult.OperatorForcedSuccess;
-			else if (network.restricted && network.password != password)
+			else if (network.restricted && !network.VerifyPassword(password))
 				return NetworkActionResult.UnauthorizedModification;
 
 			_networks.RemoveAt(networkIndex);
@@ -564,8 +636,10 @@ namespace MagicStorage.Common.Systems {
 				return result;
 
 			result = CheckNetworkJoin(plr, id, password);
-			if (result.IsSuccess())
+			if (result.IsSuccess()) {
+				plr.GetModPlayer<SecurityPlayer>().JoinNetwork(id);
 				AuditSystem.ReportSecurityNetworkJoin(player, id);
+			}
 
 			return result;
 		}
@@ -590,11 +664,10 @@ namespace MagicStorage.Common.Systems {
 			if (network.creator == player.GetModPlayer<SecurityPlayer>().UniqueID)
 				goto Success;
 
-			if (network.restricted && network.password != password)
+			if (network.restricted && !network.VerifyPassword(password))
 				return NetworkActionResult.UnauthorizedAccess;
 
 		Success:
-		//	player.GetModPlayer<SecurityPlayer>().JoinNetwork(id);
 			return success;
 		}
 
@@ -672,14 +745,14 @@ namespace MagicStorage.Common.Systems {
 			if (!result.IsSuccess())
 				return result;
 
-			if (!TryGetPassword(id, out string? oldPassword).IsSuccess())
+			if (!TryGetNetwork(id, out _))
 				return NetworkActionResult.NetworkNotFound;
 
 			bool oldRestricted = GetNetwork(id).restricted;
 
 			result = CheckNetworkModification(plr, SecurityPlayer.GetID(player), id, updatedName, updatedPassword, updatedRestricted, out passwordChanged, out privacyChanged);
 			if (result.IsSuccess())
-				AuditSystem.ReportSecurityNetworkModification(plr, id, oldPassword, oldRestricted, updatedPassword ?? oldPassword, updatedRestricted ?? oldRestricted);
+				AuditSystem.ReportSecurityNetworkModification(plr, id, passwordChanged, oldRestricted, updatedRestricted ?? oldRestricted);
 
 			return result;
 		}
@@ -705,27 +778,26 @@ namespace MagicStorage.Common.Systems {
 			if (updatedPassword is not null && network.restricted && string.IsNullOrWhiteSpace(updatedPassword))
 				return NetworkActionResult.EmptyPassword;
 
-			if (updatedRestricted is bool r && r && string.IsNullOrWhiteSpace(updatedPassword))
+			if (updatedRestricted is true && !network.restricted && string.IsNullOrWhiteSpace(updatedPassword))
 				return NetworkActionResult.EmptyPassword;
 
 			// Perform the modifications
 			if (updatedName is not null)
 				network.name = updatedName;
 
-			string? oldPassword = network.password;
 			bool oldRestricted = network.restricted;
 
 			if (updatedPassword is not null)
-				network.password = network.restricted ? updatedPassword : null;
+				network.SetPassword(network.restricted || updatedRestricted is true ? updatedPassword : null);
 
 			if (updatedRestricted is bool restricted) {
 				if (!restricted)
-					network.password = null!;  // Public networks have no password
+					network.SetPassword(null);
 
 				network.restricted = restricted;
 			}
 
-			passwordChanged = network.password != oldPassword;
+			passwordChanged = updatedPassword is not null || oldRestricted && !network.restricted;
 			privacyChanged = network.restricted != oldRestricted;
 
 			return success;
@@ -760,12 +832,23 @@ namespace MagicStorage.Common.Systems {
 			if (!TileEntity.ByPosition.TryGetValue(heartPosition, out TileEntity? te) || te is not TEStorageHeart heart)
 				return NetworkActionResult.EntityNotFound;
 
-			AuditSystem.ReportSecurityNetworkAssignment(plr, heart, id);
+			if (!InboundPacketGuard.IsWithinTileRange(plr.Center.ToTileCoordinates(), heartPosition, plr.lastTileRangeX, plr.lastTileRangeY))
+				return NetworkActionResult.UnauthorizedAccess;
 
-			return ChangeNetworkAssignments(plr, heart, id);
+			result = ChangeNetworkAssignments(plr, heart, id);
+			if (result.IsSuccess())
+				AuditSystem.ReportSecurityNetworkAssignment(plr, heart, id);
+
+			return result;
 		}
 
 		private static NetworkActionResult ChangeNetworkAssignments(Player player, TEStorageHeart heart, int id) {
+			if (!IsValidNetworkAssignmentTarget(id, NetworkExists(id)))
+				return NetworkActionResult.NetworkNotFound;
+
+			if (!CanPlayerAccessImmediately(player, heart.assignedNetwork) || !CanPlayerAccessImmediately(player, id))
+				return NetworkActionResult.UnauthorizedAccess;
+
 			heart.assignedNetwork = id;
 			NetHelper.SyncStorageComponentNetwork(heart);
 
@@ -776,6 +859,8 @@ namespace MagicStorage.Common.Systems {
 
 			return player.GetModPlayer<OperatorPlayer>().hasOp ? NetworkActionResult.OperatorForcedSuccess : NetworkActionResult.Success;
 		}
+
+		internal static bool IsValidNetworkAssignmentTarget(int id, bool networkExists) => id == -1 || id >= 0 && networkExists;
 
 		internal static void HandleNetworkAccessibilityOnCreation(NetworkActionResult result, int creator, Player player, int networkID) {
 			if (result is NetworkActionResult.NeedsServerApproval) {
@@ -877,24 +962,25 @@ namespace MagicStorage.Common.Systems {
 				return;
 			}
 
-			if (result.IsSuccess())
+			if (!result.IsSuccess() || !outdatedAuthorization)
 				return;
 
 			var securityPlayer = player.GetModPlayer<SecurityPlayer>();
 
-			if (!view.restricted) {
+			if (ShouldRetainNetworkAccess(view.restricted, isOwner, player.GetModPlayer<OperatorPlayer>().hasOp)) {
 				// Public networks are always accessible
 				securityPlayer.JoinNetwork(view.id);
-
-			} else if (!isOwner && !player.GetModPlayer<OperatorPlayer>().hasOp) {
+			} else {
 				// Non-Operators should have their access revoked
 				securityPlayer.RemoveNetworkAccess(view.id);
 			}
 		}
 
-		internal readonly struct SimpleNetworkView(int id, string? password) {
+		internal static bool ShouldRetainNetworkAccess(bool restricted, bool isOwner, bool isOperator)
+			=> !restricted || isOwner || isOperator;
+
+		internal readonly struct SimpleNetworkView(int id) {
 			public readonly int id = id;
-			public readonly string? password = password;
 		}
 
 		internal static NetworkActionResult ServerDefaultAccessibleNetworks(int player, out SimpleNetworkView[] networks) {
@@ -915,11 +1001,11 @@ namespace MagicStorage.Common.Systems {
 
 			if (plr.GetModPlayer<OperatorPlayer>().IsAdministrator) {
 				// Administrators have access to all networks
-				accessible.AddRange(_networks.Select(static n => new SimpleNetworkView(n.uniqueID, n.password)));
+				accessible.AddRange(_networks.Select(static n => new SimpleNetworkView(n.uniqueID)));
 			} else {
 				foreach (Network network in _networks) {
 					if (!network.restricted || network.creator == id)
-						accessible.Add(new(network.uniqueID, network.password));
+					accessible.Add(new(network.uniqueID));
 				}
 			}
 
@@ -972,6 +1058,45 @@ namespace MagicStorage.Common.Systems {
 		}
 
 		public static bool HasActiveAccessContext() => accessingPlayer >= 0;
+
+		internal static void VerifyPasswordPersistencePolicy() {
+			const string password = "verification-secret";
+			Network network = new() {
+				creator = Guid.NewGuid(),
+				creatorNameFallback = "Verifier",
+				name = "Verifier",
+				restricted = true,
+				uniqueID = 1
+			};
+			network.SetPassword(password);
+			if (!network.VerifyPassword(password) || network.VerifyPassword("wrong"))
+				throw new InvalidOperationException("Password verifier accepted an invalid credential state.");
+
+			TagCompound saved = new();
+			network.Save(saved);
+			if (saved.ContainsKey("password") || !saved.ContainsKey("passwordSalt") || !saved.ContainsKey("passwordHash"))
+				throw new InvalidOperationException("Network persistence retained a reversible password value.");
+
+			Network roundTrip = new();
+			roundTrip.Load(saved);
+			if (!roundTrip.VerifyPassword(password) || roundTrip.VerifyPassword("wrong"))
+				throw new InvalidOperationException("Password verifier did not survive persistence.");
+
+			TagCompound legacy = new() {
+				["id"] = 2,
+				["creator"] = Guid.NewGuid().ToByteArray(),
+				["creatorName"] = "Legacy Verifier",
+				["name"] = "Legacy Verifier",
+				["password"] = StringScrambling.Scramble(password),
+				["restricted"] = true
+			};
+			Network migrated = new();
+			migrated.Load(legacy);
+			TagCompound migratedSave = new();
+			migrated.Save(migratedSave);
+			if (!migrated.VerifyPassword(password) || migratedSave.ContainsKey("password"))
+				throw new InvalidOperationException("Legacy password persistence was not migrated to a verifier.");
+		}
 	}
 
 	public enum NetworkActionResult {

@@ -7,6 +7,8 @@ using System.Linq;
 using MagicStorage.Components;
 using System.Runtime.CompilerServices;
 using MagicStorage.CrossMod;
+using MagicStorage.Common.Systems.RecurrentRecipes;
+using Terraria.DataStructures;
 
 namespace MagicStorage {
 	partial class CraftingGUI {
@@ -29,8 +31,9 @@ namespace MagicStorage {
 			List<Item> toWithdraw = new(), results = new();
 
 			TEStorageHeart heart = GetHeart();
+			Player player = Main.LocalPlayer;
 
-			EnvironmentSandbox sandbox = new(Main.LocalPlayer, heart);
+			EnvironmentSandbox sandbox = new(player, heart);
 
 			return new CraftingContext() {
 				sourceItems = sourceItems,
@@ -43,8 +46,95 @@ namespace MagicStorage {
 				sourceItemsFromModules = fromModule,
 				modules = heart?.GetModules().ToArray() ?? Array.Empty<EnvironmentModule>(),
 				toCraft = toCraft,
-				recipe = recipe
+				recipe = recipe,
+				player = player,
+				heart = heart,
+				environment = ReadCraftingEnvironment()
 			};
+		}
+
+		private static CraftingContext InitServerCraftingContext(Player player, TEStorageHeart heart, TECraftingAccess access, Recipe recipe, int toCraft, bool captureRecipeConditions = false) {
+			int previousPlayer = Main.myPlayer;
+			Main.myPlayer = player.whoAmI;
+			try {
+				EnvironmentModule[] modules = heart.GetModules().ToArray();
+				EnvironmentSandbox sandbox = new(player, heart);
+				List<Item> sourceItems = heart.GetStoredItems().Where(static item => !item.IsAir).Select(static item => item.Clone()).ToList();
+				List<Item> moduleItems = [];
+				HashSet<Item> seenModuleItems = new(ReferenceEqualityComparer.Instance);
+				foreach (EnvironmentModule module in modules) {
+					foreach (Item item in module.GetAdditionalItems(sandbox) ?? []) {
+						if (item is { IsAir: false } && seenModuleItems.Add(item))
+							moduleItems.Add(item);
+					}
+				}
+				List<Item> moduleSnapshot = moduleItems.Select(static item => item.Clone()).ToList();
+
+				Dictionary<int, int> counts = new();
+				foreach (Item item in sourceItems.Concat(moduleSnapshot))
+					counts.AddOrSumCount(item.type, item.stack);
+
+				CraftingInformation environment = new(false, false, false, false, false, false, false, false, new bool[TileLoader.TileCount]);
+				if (access is not null) {
+					foreach (Item station in access.stations)
+						Utility.AddCraftingZones(player, station, ref environment);
+					environment.adjTiles[ModContent.TileType<CraftingAccess>()] = true;
+				}
+				foreach (EnvironmentModule module in modules)
+					module.ModifyCraftingZones(sandbox, ref environment);
+
+				HashSet<int> infiniteItems = sandbox.LoadInfiniteItems();
+				bool creativeUnitPresent = sandbox.HeartHasCreativeUnit();
+				bool[] recipeConditions = null;
+				if (captureRecipeConditions) {
+					recipeConditions = new bool[Recipe.numRecipes];
+					ExecuteInCraftingEnvironment(player, environment, () => {
+						for (int i = 0; i < Recipe.numRecipes; i++)
+							recipeConditions[i] = Utility.IsAvailableForSnapshot(Main.recipe[i]);
+					});
+				}
+
+				return new CraftingContext {
+					sourceItems = sourceItems,
+					availableItems = sourceItems.Select(static item => item.Clone()).ToList(),
+					toWithdraw = [],
+					results = [],
+					itemCounts = counts,
+					sourceItemsFromModules = moduleSnapshot,
+					sandbox = sandbox,
+					consumedItemsFromModules = [],
+					moduleItemsToCommit = moduleItems,
+					modules = modules,
+					toCraft = toCraft,
+					recipe = recipe,
+					player = player,
+					heart = heart,
+					environment = environment,
+					availableRecipeObjects = new AvailableRecipeObjects(environment.adjTiles, counts, recipeConditions, infiniteItems, creativeUnitPresent,
+						captureRecipeConditions ? null : static candidate => !candidate.Disabled && RecipeLoader.RecipeAvailable(candidate))
+				};
+			} finally {
+				Main.myPlayer = previousPlayer;
+			}
+		}
+
+		internal static bool TryPlanServerItemConsumption(Player player, TEStorageHeart heart, IEnumerable<Item> requirements, out List<Item> storageItems, out List<Item> moduleItems, out List<Item> moduleItemsToCommit) {
+			CraftingContext context = InitServerCraftingContext(player, heart, null, null, 0);
+
+			foreach (Item requirement in requirements) {
+				int stack = requirement.stack;
+				if (stack <= 0 || !AttemptToConsumeItem(context, requirement.type, ref stack, checkRecipeGroup: false) || stack > 0) {
+					storageItems = [];
+					moduleItems = [];
+					moduleItemsToCommit = [];
+					return false;
+				}
+			}
+
+			storageItems = CompactItemList(context.toWithdraw);
+			moduleItems = CompactItemList(context.consumedItemsFromModules);
+			moduleItemsToCommit = context.moduleItemsToCommit;
+			return true;
 		}
 
 		private static bool CanConsumeItem(CraftingContext context, Item reqItem, List<Item> origWithdraw, List<Item> origResults, List<Item> origFromModule, out bool wasAvailable, out int stackConsumed, bool checkRecipeGroup = true) {
@@ -52,10 +142,10 @@ namespace MagicStorage {
 
 			stackConsumed = reqItem.stack;
 
-			RecipeLoader.ConsumeItem(selectedRecipe, reqItem.type, ref stackConsumed);
+			RecipeLoader.ConsumeIngredient(context.recipe, reqItem.type, ref stackConsumed, isDecrafting: false);
 
 			foreach (EnvironmentModule module in context.modules)
-				module.ConsumeItemForRecipe(context.sandbox, selectedRecipe, reqItem.type, ref stackConsumed);
+				module.ConsumeItemForRecipe(context.sandbox, context.recipe, reqItem.type, ref stackConsumed);
 
 			// FIX: v0.7.0.9 - Ingredient reductions from callbacks like the one from using the Alchemy Table weren't respected in the consumption process
 			reqItem.stack = stackConsumed;
@@ -89,6 +179,26 @@ namespace MagicStorage {
 				|| CheckContextItemCollection(context, GetModuleItems(context), reqType, ref stack, OnModuleItemConsumed, checkRecipeGroup);
 		}
 
+		private static CraftingContext CloneCraftingContextForValidation(CraftingContext context) => new() {
+			sourceItems = context.sourceItems.Select(static item => item.Clone()).ToList(),
+			availableItems = context.availableItems.Select(static item => item.Clone()).ToList(),
+			toWithdraw = context.toWithdraw.Select(static item => item.Clone()).ToList(),
+			results = context.results.Select(static item => item.Clone()).ToList(),
+			itemCounts = new Dictionary<int, int>(context.itemCounts),
+			sourceItemsFromModules = context.sourceItemsFromModules.Select(static item => item.Clone()).ToList(),
+			sandbox = context.sandbox,
+			consumedItemsFromModules = context.consumedItemsFromModules.Select(static item => item.Clone()).ToList(),
+			moduleItemsToCommit = context.moduleItemsToCommit,
+			modules = context.modules,
+			toCraft = context.toCraft,
+			simulation = true,
+			recipe = context.recipe,
+			player = context.player,
+			heart = context.heart,
+			environment = context.environment,
+			availableRecipeObjects = context.availableRecipeObjects
+		};
+
 		private static IEnumerable<Item> GetAvailableItems(CraftingContext context) {
 			for (int i = 0; i < context.availableItems.Count; i++)
 				yield return context.availableItems[i];
@@ -119,12 +229,12 @@ namespace MagicStorage {
 
 		private static bool CheckContextItemCollection(CraftingContext context, IEnumerable<Item> items, int reqType, ref int stack, Action<CraftingContext, int, Item, int> onItemConsumed, bool checkRecipeGroup = true) {
 			int index = 0;
-			foreach (Item tryItem in !context.simulation ? items : items.Select(static i => new Item(i.type, i.stack))) {
+			foreach (Item tryItem in items) {
 				// Recursion crafting can cause the item stack to be zero
 				if (tryItem.stack <= 0)
 					continue;
 
-				if (reqType == tryItem.type || (checkRecipeGroup && RecipeGroupMatch(selectedRecipe, tryItem.type, reqType))) {
+				if (reqType == tryItem.type || (checkRecipeGroup && RecipeGroupMatch(context.recipe, tryItem.type, reqType))) {
 					int stackToConsume;
 
 					if (tryItem.stack > stack) {

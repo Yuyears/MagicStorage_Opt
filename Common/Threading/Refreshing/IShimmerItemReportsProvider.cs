@@ -17,8 +17,14 @@ namespace MagicStorage.Common.Threading.Refreshing {
 		}
 
 		public void CollectObjects(int selectedItem) {
-			if (selectedItem > ItemID.None)
-				reports.AddRange(MagicCache.ShimmerInfos[selectedItem].GetShimmerReports().OfType<ItemReport>());
+			ReplaceReports(selectedItem > ItemID.None
+				? MagicCache.ShimmerInfos[selectedItem].GetShimmerReports().OfType<ItemReport>()
+				: []);
+		}
+
+		internal void ReplaceReports(IEnumerable<ItemReport> source) {
+			reports.Clear();
+			reports.AddRange(source);
 		}
 
 		public void CopyFromStaticCollection() {

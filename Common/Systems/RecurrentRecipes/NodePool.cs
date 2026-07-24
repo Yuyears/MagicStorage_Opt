@@ -1,8 +1,11 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using Terraria.ModLoader;
 using Terraria;
 using System.Collections.Concurrent;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace MagicStorage.Common.Systems.RecurrentRecipes {
 	public static class NodePool {
@@ -14,6 +17,7 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 
 		private static readonly ConcurrentDictionary<int, Node> pool = new();
 		private static readonly ConcurrentDictionary<int, List<Node>> resultToNodes = new();
+		private static int nextPoolIndex;
 
 		internal static Node Get(int index) => pool[index];
 
@@ -29,9 +33,12 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 				Node node = list.FirstOrDefault(n => Utility.RecipesMatchForHistory(recipe, n.info.sourceRecipe));
 
 				if (node is null) {
-					int index = pool.Count;
-					pool.TryAdd(index, node = new Node(recipe, index));
-					resultToNodes[type].Add(node);
+					int index = ReservePoolIndex();
+					node = new Node(recipe, index);
+					if (!pool.TryAdd(index, node))
+						throw new InvalidOperationException($"Recursive recipe node identity collision at index {index}");
+
+					list.Add(node);
 				}
 
 				return node;
@@ -44,6 +51,16 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 
 			pool.Clear();
 			resultToNodes.Clear();
+			Interlocked.Exchange(ref nextPoolIndex, 0);
+		}
+
+		private static int ReservePoolIndex() => Interlocked.Increment(ref nextPoolIndex) - 1;
+
+		internal static bool VerifyParallelIdentityAllocation() {
+			const int count = 256;
+			int[] indexes = new int[count];
+			Parallel.For(0, count, i => indexes[i] = ReservePoolIndex());
+			return indexes.Distinct().Count() == count;
 		}
 	}
 }

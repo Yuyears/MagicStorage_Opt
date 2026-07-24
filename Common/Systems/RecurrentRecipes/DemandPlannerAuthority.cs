@@ -38,25 +38,25 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 		}
 
 		public static bool IsUiAuthorized(InventoryCraftabilityRecipeProbe probe) {
-			return Classify(probe) switch {
-				DemandPlannerAuthorityClass.Direct => true,
-				DemandPlannerAuthorityClass.RecipeGroup => true,
-				DemandPlannerAuthorityClass.VirtualDependency => IsVirtualDependencyUiAuthorized,
-				DemandPlannerAuthorityClass.CyclicBounded => AuthorizeCyclicBoundedForUi,
-				DemandPlannerAuthorityClass.RootAlternate => AuthorizeRootAlternateForUi,
-				_ => false
-			};
+			return probe.HasCandidate && AreFlagsAuthorized(
+				probe.Flags,
+				IsVirtualDependencyUiAuthorized,
+				AuthorizeCyclicBoundedForUi,
+				AuthorizeRootAlternateForUi);
 		}
 
-		public static bool IsDiagnosticSupported(InventoryCraftabilityRecipeProbe probe) {
-			return Classify(probe) switch {
-				DemandPlannerAuthorityClass.Direct => true,
-				DemandPlannerAuthorityClass.RecipeGroup => true,
-				DemandPlannerAuthorityClass.VirtualDependency => true,
-				DemandPlannerAuthorityClass.CyclicBounded => true,
-				DemandPlannerAuthorityClass.RootAlternate => true,
-				_ => false
-			};
+		public static bool IsDiagnosticSupported(InventoryCraftabilityRecipeProbe probe)
+			=> probe.HasCandidate && AreFlagsAuthorized(probe.Flags, authorizeVirtual: true, authorizeCyclic: true, authorizeAlternate: true);
+
+		internal static bool AreFlagsAuthorized(InventoryCraftabilityProbeFlags flags, bool authorizeVirtual, bool authorizeCyclic, bool authorizeAlternate) {
+			if (!authorizeAlternate && (flags & InventoryCraftabilityProbeFlags.AlternateSameResultRecipe) != 0)
+				return false;
+			if (!authorizeCyclic && (flags & InventoryCraftabilityProbeFlags.CyclicDependencyRegion) != 0)
+				return false;
+			if (!authorizeVirtual && (flags & InventoryCraftabilityProbeFlags.VirtualDependency) != 0)
+				return false;
+
+			return true;
 		}
 
 		public static bool IsChildCandidateSupported(InventoryCraftabilityRecipeProbe probe, bool allowAlternateSameResult) {

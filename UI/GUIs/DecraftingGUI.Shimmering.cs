@@ -114,7 +114,8 @@ namespace MagicStorage {
 			} else if (Main.netMode == NetmodeID.MultiplayerClient) {
 				NetHelper.Report(true, "Sending shimmer request to server...");
 
-				NetHelper.RequestItemShimmering(selectedItem, toShimmer, context.storage, context.results);
+				if (StoragePlayer.LocalPlayer.GetDecraftingAccess() is TEDecraftingAccess access)
+					NetHelper.RequestItemShimmering(access, selectedItem, toShimmer);
 			}
 		}
 

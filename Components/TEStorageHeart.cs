@@ -17,6 +17,8 @@ using MagicStorage.Common;
 using System.Runtime.CompilerServices;
 using MagicStorage.Common.Systems.Auditing;
 using MagicStorage.CrossMod;
+using System.Diagnostics;
+using System.Threading;
 
 namespace MagicStorage.Components
 {
@@ -65,9 +67,23 @@ namespace MagicStorage.Components
 			public int client { get; }
 
 			public int? AccessingPlayer { get; set; }
+			public long OperationId { get; set; }
 		}
 
+		internal enum PendingOperationKind : byte { Storage, Craft }
+		private readonly record struct PendingNetworkOperation(PendingOperationKind Kind, long StartedAt);
+		internal const int NetworkOperationTimeoutMilliseconds = 2500;
+		internal const int CraftOperationTimeoutMilliseconds = 120000;
+		internal const int NetworkWarningCooldownMilliseconds = 10000;
+		private static long nextClientOperationId;
+		private readonly Dictionary<long, PendingNetworkOperation> pendingNetworkOperations = new();
+		private long lastNetworkRevision;
+		private long networkRevision;
+		private long lastNetworkWarningAt;
+
 		ConcurrentQueue<NetOperation> clientOpQ = new ConcurrentQueue<NetOperation>();
+		private readonly Queue<CraftingGUI.ServerCraftRequest> serverCraftQueue = new();
+		private CraftingGUI.ServerCraftRequest activeServerCraft;
 		internal bool compactCoins = false;
 	//	private const int UNIQUE_ITEM_HISTORY_SIZE = StorageGUI.RECENT_FILTER_ITEM_COUNT + 30;
 	//	private readonly ItemTypeOrderedSet _uniqueItemsPutHistory = new("UniqueItemsPutHistory") { MemoryLimit = UNIQUE_ITEM_HISTORY_SIZE };
@@ -94,6 +110,59 @@ namespace MagicStorage.Components
 
 		internal bool netcodeUpdate;
 		internal int netDesync;
+		internal long NetworkRevision => networkRevision;
+
+		internal long BeginClientOperation(PendingOperationKind kind) {
+			long operationId = Interlocked.Increment(ref nextClientOperationId);
+			pendingNetworkOperations[operationId] = new PendingNetworkOperation(kind, Stopwatch.GetTimestamp());
+			return operationId;
+		}
+
+		internal bool HasPendingOperation(PendingOperationKind kind)
+			=> pendingNetworkOperations.Values.Any(operation => operation.Kind == kind);
+
+		internal bool CompleteClientOperation(long operationId)
+			=> pendingNetworkOperations.Remove(operationId);
+
+		internal bool AcceptNetworkRevision(long revision) {
+			if (revision < lastNetworkRevision)
+				return false;
+			lastNetworkRevision = revision;
+			return true;
+		}
+
+		internal bool TryConsumeTimedOutOperation(out long operationId, out double elapsedMilliseconds, out bool shouldWarn) {
+			operationId = 0;
+			elapsedMilliseconds = 0;
+			shouldWarn = false;
+			long now = Stopwatch.GetTimestamp();
+			var oldest = pendingNetworkOperations
+				.OrderBy(static pair => pair.Value.StartedAt)
+				.FirstOrDefault(pair => IsPendingOperationTimedOut(pair.Value, now));
+			if (oldest.Key == 0)
+				return false;
+
+			pendingNetworkOperations.Remove(oldest.Key);
+			operationId = oldest.Key;
+			elapsedMilliseconds = Stopwatch.GetElapsedTime(oldest.Value.StartedAt, now).TotalMilliseconds;
+			shouldWarn = lastNetworkWarningAt == 0 || Stopwatch.GetElapsedTime(lastNetworkWarningAt, now).TotalMilliseconds >= NetworkWarningCooldownMilliseconds;
+			return true;
+		}
+
+		internal long AdvanceNetworkRevision() => ++networkRevision;
+
+		internal void MarkNetworkWarning() => lastNetworkWarningAt = Stopwatch.GetTimestamp();
+
+		internal static bool IsNetworkOperationTimedOut(long startedAt, long now)
+			=> Stopwatch.GetElapsedTime(startedAt, now).TotalMilliseconds >= NetworkOperationTimeoutMilliseconds;
+
+		private static bool IsPendingOperationTimedOut(PendingNetworkOperation operation, long now) {
+			int timeout = operation.Kind == PendingOperationKind.Craft ? CraftOperationTimeoutMilliseconds : NetworkOperationTimeoutMilliseconds;
+			return Stopwatch.GetElapsedTime(operation.StartedAt, now).TotalMilliseconds >= timeout;
+		}
+
+		internal static bool ShouldAcceptNetworkRevision(long currentRevision, long incomingRevision)
+			=> incomingRevision >= currentRevision;
 
 		public IEnumerable<Item> UniqueItemsPutHistory => _uniqueItemsPutHistory.Items;
 		private int requestingHistory;
@@ -105,6 +174,38 @@ namespace MagicStorage.Components
 		{
 			base.OnKill();  // NOTE: very important!  TEStorageCenter.OnKill() handles disconnecting the components in the network
 			IsAlive = false;
+			if (activeServerCraft is not null)
+				CraftingGUI.CancelServerCraft(activeServerCraft);
+			foreach (CraftingGUI.ServerCraftRequest request in serverCraftQueue)
+				CraftingGUI.CancelServerCraft(request);
+			serverCraftQueue.Clear();
+		}
+
+		internal bool HasActiveServerCraft => activeServerCraft is not null;
+
+		internal bool TryQueueServerCraft(CraftingGUI.ServerCraftRequest request) {
+			if (activeServerCraft is not null) {
+				if (serverCraftQueue.Count >= CraftingGUI.MaxQueuedServerCrafts - 1)
+					return false;
+
+				serverCraftQueue.Enqueue(request);
+				return true;
+			}
+
+			activeServerCraft = request;
+			CraftingGUI.StartServerCraft(request);
+			return true;
+		}
+
+		internal void CompleteServerCraft(CraftingGUI.ServerCraftRequest request) {
+			if (!ReferenceEquals(activeServerCraft, request))
+				return;
+
+			activeServerCraft = null;
+			if (IsAlive && serverCraftQueue.TryDequeue(out CraftingGUI.ServerCraftRequest next)) {
+				activeServerCraft = next;
+				CraftingGUI.StartServerCraft(next);
+			}
 		}
 
 		public override bool ValidTile(in Tile tile) => tile.TileType == ModContent.TileType<StorageHeart>() && tile.TileFrameX == 0 && tile.TileFrameY == 0;
@@ -187,21 +288,23 @@ namespace MagicStorage.Components
 		{
 			base.Update();
 
-			if (Main.netMode == NetmodeID.Server && processClientOperations(out bool forcedRefresh, out HashSet<int> typesToRefresh))
+			if (Main.netMode == NetmodeID.Server && !HasActiveServerCraft && processClientOperations(out bool forcedRefresh, out HashSet<int> typesToRefresh))
 			{
 				NetHelper.SendRefreshNetworkItems(Position, forcedRefresh, typesToRefresh);
 			}
 
-			updateTimer++;
-			if (updateTimer >= 60)
-			{
-				updateTimer = 0;
-				if (compactCoins)
+			if (!HasActiveServerCraft) {
+				updateTimer++;
+				if (updateTimer >= 60)
 				{
-					CompactCoins();
-					compactCoins = false;
+					updateTimer = 0;
+					if (compactCoins)
+					{
+						CompactCoins();
+						compactCoins = false;
+					}
+					CompactOne();
 				}
-				CompactOne();
 			}
 		}
 
@@ -226,18 +329,16 @@ namespace MagicStorage.Components
 					}
 
 					networkRefresh = true;
+					long revision = AdvanceNetworkRevision();
 					if (op.type == Operation.Withdraw || op.type == Operation.WithdrawToInventory)
 					{
 						typesToRefresh.Add(op.item.type);
 						Item item = Withdraw(op.item, op.keepOneInFavorite);
+						ModPacket packet = PrepareServerResult(op.type, op.OperationId, revision);
+						ItemIO.Send(item, packet, true, true);
+						packet.Send(op.client);
 						if (!item.IsAir)
-						{
-							ModPacket packet = PrepareServerResult(op.type);
-							ItemIO.Send(item, packet, true, true);
-							packet.Send(op.client);
-
 							AuditSystem.ReportItemWithdraw(op.client, this, item);
-						}
 					}
 					else if (op.type == Operation.Deposit)
 					{
@@ -245,12 +346,9 @@ namespace MagicStorage.Components
 
 						typesToRefresh.Add(op.item.type);
 						DepositItem(op.item);
-						if (!op.item.IsAir)
-						{
-							ModPacket packet = PrepareServerResult(op.type);
-							ItemIO.Send(op.item, packet, true, true);
-							packet.Send(op.client);
-						}
+						ModPacket packet = PrepareServerResult(op.type, op.OperationId, revision);
+						ItemIO.Send(op.item, packet, true, true);
+						packet.Send(op.client);
 
 						if (op.item.stack != netItem.Stack)
 							AuditSystem.ReportItemDeposit(op.client, this, netItem.WithStack(netItem.Stack - op.item.stack));
@@ -276,16 +374,11 @@ namespace MagicStorage.Components
 						}
 						NetHelper.ProcessUpdateQueue();
 
-						if (leftOvers.Count > 0)
-						{
-							ModPacket packet = PrepareServerResult(op.type);
-							packet.Write(leftOvers.Count);
-							foreach (Item item in leftOvers)
-							{
-								ItemIO.Send(item, packet, true, true);
-							}
-							packet.Send(op.client);
-						}
+						ModPacket packet = PrepareServerResult(op.type, op.OperationId, revision);
+						packet.Write(leftOvers.Count);
+						foreach (Item item in leftOvers)
+							ItemIO.Send(item, packet, true, true);
+						packet.Send(op.client);
 
 						if (netItems.Count > 0)
 							AuditSystem.ReportItemDeposit(op.client, this, [.. netItems]);
@@ -294,14 +387,11 @@ namespace MagicStorage.Components
 					{
 						WithdrawManyAndDestroy(op.item.type, out int itemsDestroyed);
 
+						ModPacket packet = PrepareServerResult(op.type, op.OperationId, revision);
+						packet.Write(op.item.type);
+						packet.Send(op.client);
 						if (HasItem(op.item, true))
-						{
-							ModPacket packet = PrepareServerResult(op.type);
-							packet.Write(op.item.type);
-							packet.Send();
-
 							forcedRefresh = true;
-						}
 
 						if (itemsDestroyed > 0) {
 							if (op.item.type == ModContent.ItemType<UnloadedItem>())
@@ -314,8 +404,8 @@ namespace MagicStorage.Components
 					{
 						DestroyUnloadedGlobalItemData(out int itemsAffected);
 
-						ModPacket packet = PrepareServerResult(op.type);
-						packet.Send();
+						ModPacket packet = PrepareServerResult(op.type, op.OperationId, revision);
+						packet.Send(op.client);
 
 						forcedRefresh = true;
 
@@ -328,7 +418,7 @@ namespace MagicStorage.Components
 						Item requested = op.item.Clone();
 						Item item = Withdraw(op.item, false);
 
-						ModPacket packet = PrepareServerResult(op.type);
+						ModPacket packet = PrepareServerResult(op.type, op.OperationId, revision);
 						ItemIO.Send(item, packet, true, true);
 						ItemIO.Send(requested, packet, true, true);
 						packet.Send(op.client);
@@ -350,6 +440,7 @@ namespace MagicStorage.Components
 
 		public void QClientOperation(BinaryReader reader, Operation op, int client)
 		{
+			long operationId = reader.ReadInt64();
 			NetOperation netOp = null;
 
 			if (op == Operation.Withdraw || op == Operation.WithdrawToInventory)
@@ -391,6 +482,7 @@ namespace MagicStorage.Components
 			}
 
 			if (netOp is not null) {
+				netOp.OperationId = operationId;
 				if (SecuritySystem.TryGetCurrentAccessContext(out var context))
 					netOp.AccessingPlayer = context.Player;
 
@@ -400,22 +492,25 @@ namespace MagicStorage.Components
 			}
 		}
 
-		internal ModPacket PrepareServerResult(Operation op)
+		internal ModPacket PrepareServerResult(Operation op, long operationId, long revision)
 		{
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
 			packet.Write((byte)MessageType.ServerStorageResult);
 			packet.Write((byte)op);
 			packet.Write(Position);
+			packet.Write(operationId);
+			packet.Write(revision);
 			return packet;
 		}
 
 		internal ModPacket PrepareClientRequest(Operation op)
 		{
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
-			packet.Write((byte)MessageType.ClinetStorageOperation);
+			packet.Write((byte)MessageType.ClientStorageOperation);
 			packet.Write(Position.X);
 			packet.Write(Position.Y);
 			packet.Write((byte)op);
+			packet.Write(BeginClientOperation(PendingOperationKind.Storage));
 
 			return packet;
 		}

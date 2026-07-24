@@ -23,7 +23,7 @@ namespace MagicStorage {
 			);
 		}
 
-		public class CraftingRefreshThread : RefreshThread, IStorageItemsPovider, IProcessedStorageItemsProvider, IMainZoneFilterControlsProvider<Recipe>, IMainZoneObjectResultsProvider<Recipe>, IIngredientControlsProvider, ICraftingObjectProvider<Recipe>, ICraftObjectAvailableCacheProvider<Recipe>, IRecipeSimulationsProvider, IRecipeSnapshotsProvider, IRecipeItemsProvider, ICraftingRefreshTimingProvider {
+		public class CraftingRefreshThread : RefreshThread, IStorageItemsProvider, IProcessedStorageItemsProvider, IMainZoneFilterControlsProvider<Recipe>, IMainZoneObjectResultsProvider<Recipe>, IIngredientControlsProvider, ICraftingObjectProvider<Recipe>, ICraftObjectAvailableCacheProvider<Recipe>, IRecipeSimulationsProvider, IRecipeSnapshotsProvider, IRecipeItemsProvider, ICraftingRefreshTimingProvider {
 			public override bool IsPartialThread => false;
 
 			public override bool HasCompleteData => CraftingGUI.hasCompleteData;

@@ -4,6 +4,7 @@ using MagicStorage.Common.Systems.RecurrentRecipes;
 using MagicStorage.Common.Threading;
 using MagicStorage.Common.Threading.Refreshing;
 using MagicStorage.Components;
+using MagicStorage.CrossMod;
 using MagicStorage.UI.States;
 using System;
 using System.Collections.Generic;
@@ -54,6 +55,7 @@ namespace MagicStorage
 			storageItemInfo.Clear();
 			items.Clear();
 			itemGroups.Clear();
+			unfilteredItems.Clear();
 			itemCounts.Clear();
 			itemCountsByPrefix.Clear();
 			itemCountsHash.Value = 0;
@@ -112,21 +114,29 @@ namespace MagicStorage
 		}
 
 		public static bool MeetsIngredientRequirement(Recipe recipe, Dictionary<int, int> countsDictionary, int ingredientType, int requiredStack) {
-			if (MeetsIngredientRequirement_CheckCounts(countsDictionary, ingredientType, ref requiredStack))
-				return true;
+			foreach (int itemType in EnumerateAcceptedIngredientTypes(recipe, ingredientType))
+				if (MeetsIngredientRequirement_CheckCounts(countsDictionary, itemType, ref requiredStack))
+					return true;
+
+			return false;
+		}
+
+		private static IEnumerable<int> EnumerateAcceptedIngredientTypes(Recipe recipe, int ingredientType) {
+			HashSet<int> seen = [ingredientType];
+			yield return ingredientType;
+
+			if (recipe is null)
+				yield break;
 
 			foreach (int group in recipe.acceptedGroups) {
 				RecipeGroup recipeGroup = RecipeGroup.recipeGroups[group];
+				if (!recipeGroup.ContainsItem(ingredientType))
+					continue;
 
-				if (recipeGroup.ContainsItem(ingredientType)) {
-					foreach (int groupItemType in recipeGroup.ValidItems) {
-						if (MeetsIngredientRequirement_CheckCounts(countsDictionary, groupItemType, ref requiredStack))
-							return true;
-					}
-				}
+				foreach (int groupItemType in recipeGroup.ValidItems)
+					if (seen.Add(groupItemType))
+						yield return groupItemType;
 			}
-
-			return false;
 		}
 
 		private static bool MeetsIngredientRequirement_CheckCounts(Dictionary<int, int> countsDictionary, int itemType, ref int requiredStack) {
@@ -236,6 +246,7 @@ namespace MagicStorage
 					staticModuleItemWasFromInventoryTable: moduleItemWasFromInventory,
 					staticResultItemsList: items,
 					staticResultItemGroupsList: itemGroups,
+					staticUnfilteredItemsList: unfilteredItems,
 					staticResultItemsFromModulesList: sourceItemsFromModules,
 					staticCountsDictionary: itemCounts,
 					staticCountsByPrefixDictionary: itemCountsByPrefix,
@@ -308,6 +319,7 @@ namespace MagicStorage
 					staticModuleItemWasFromInventoryTable: moduleItemWasFromInventory,
 					staticResultItemsList: items,
 					staticResultItemGroupsList: itemGroups,
+					staticUnfilteredItemsList: unfilteredItems,
 					staticResultItemsFromModulesList: sourceItemsFromModules,
 					staticCountsDictionary: itemCounts,
 					staticCountsByPrefixDictionary: itemCountsByPrefix,
@@ -389,38 +401,50 @@ namespace MagicStorage
 		}
 
 		internal static bool TryGetIngredientQuantity(Recipe recipe, Dictionary<int, int> storageQuantity, HashSet<int> infiniteItems, int requiredIngredient, out int totalQuantity) {
-			if (infiniteItems.Contains(requiredIngredient)) {
-				totalQuantity = int.MaxValue;
-				return false;
-			}
-
 			ClampedArithmetic total = 0;
-
-			if (storageQuantity.TryGetValue(requiredIngredient, out int quantity))
-				total += quantity;
-
-			if (recipe is null)
-				goto SkipRecipeGroupsCheck;
-
-			foreach (int group in recipe.acceptedGroups) {
-				RecipeGroup recipeGroup = RecipeGroup.recipeGroups[group];
-
-				if (recipeGroup.ContainsItem(requiredIngredient)) {
-					foreach (int groupItemType in recipeGroup.ValidItems) {
-						if (infiniteItems.Contains(groupItemType)) {
-							totalQuantity = int.MaxValue;
-							return false;
-						}
-
-						if (storageQuantity.TryGetValue(groupItemType, out int groupItemQuantity))
-							total += groupItemQuantity;
-					}
+			foreach (int itemType in EnumerateAcceptedIngredientTypes(recipe, requiredIngredient)) {
+				if (infiniteItems.Contains(itemType)) {
+					totalQuantity = int.MaxValue;
+					return false;
 				}
-			}
 
-			SkipRecipeGroupsCheck:
+				if (storageQuantity.TryGetValue(itemType, out int quantity))
+					total += quantity;
+			}
 
 			totalQuantity = total;
+			return true;
+		}
+
+		internal static bool CanReserveRecipeBatches(Recipe recipe, Dictionary<int, int> itemCounts, HashSet<int> infiniteItems, int batches) {
+			Dictionary<int, int> remaining = new(itemCounts);
+			int[][] acceptedTypes = recipe.requiredItem.Select(ingredient => EnumerateAcceptedIngredientTypes(recipe, ingredient.type).ToArray()).ToArray();
+			for (int batch = 0; batch < batches; batch++) {
+				for (int ingredientIndex = 0; ingredientIndex < recipe.requiredItem.Count; ingredientIndex++) {
+					Item ingredient = recipe.requiredItem[ingredientIndex];
+					int[] ingredientTypes = acceptedTypes[ingredientIndex];
+					if (ingredientTypes.Any(infiniteItems.Contains))
+						continue;
+
+					int needed = ingredient.stack;
+					foreach (int itemType in ingredientTypes) {
+						if (!remaining.TryGetValue(itemType, out int available) || available <= 0)
+							continue;
+
+						int consumed = Math.Min(needed, available);
+						remaining[itemType] = available - consumed;
+						needed -= consumed;
+						if (needed <= 0)
+							break;
+					}
+
+					if (needed > 0)
+						return false;
+				}
+
+				remaining.AddOrSumCount(recipe.createItem.type, recipe.createItem.stack);
+			}
+
 			return true;
 		}
 
@@ -500,9 +524,41 @@ namespace MagicStorage
 
 		internal static List<Item> HandleCraftWithdrawAndDeposit(TEStorageHeart heart, List<Item> toWithdraw, List<Item> results)
 		{
+			TryHandleCraftWithdrawAndDeposit(heart, toWithdraw, [], [], results, out List<Item> items);
+			return items;
+		}
+
+		internal static bool TryHandleCraftWithdrawAndDeposit(TEStorageHeart heart, List<Item> toWithdraw, List<Item> moduleConsumptions, List<Item> moduleItems, List<Item> results, out List<Item> excessItems)
+		{
+			excessItems = [];
 			NetHelper.Report(true, $"Withdrawing {toWithdraw.Count} items...");
 
 			var items = new List<Item>();
+			Dictionary<Item, int> moduleConsumptionPlan = new(ReferenceEqualityComparer.Instance);
+			Dictionary<Item, int> moduleRemaining = new(ReferenceEqualityComparer.Instance);
+			foreach (Item item in moduleItems)
+				moduleRemaining[item] = item.stack;
+
+			foreach (Item requirement in moduleConsumptions) {
+				int remaining = requirement.stack;
+				foreach (Item item in moduleItems) {
+					if (remaining <= 0)
+						break;
+					if (!moduleRemaining.TryGetValue(item, out int available) || available <= 0 || !StorageAggregator.CanCombineItems(requirement, item))
+						continue;
+
+					int consume = Math.Min(remaining, available);
+					moduleRemaining[item] = available - consume;
+					moduleConsumptionPlan[item] = moduleConsumptionPlan.GetValueOrDefault(item) + consume;
+					remaining -= consume;
+				}
+
+				if (remaining > 0) {
+					NetHelper.Report(false, "Module ingredient requirement changed before commit, aborting procedure");
+					return false;
+				}
+			}
+
 			foreach (Item tryWithdraw in toWithdraw)
 			{
 				NetHelper.Report(false, $"  {tryWithdraw.IdentifierAndStack()}");
@@ -528,11 +584,17 @@ namespace MagicStorage
 						}
 					}
 
-					goto ReturnFromMethod;
+					return false;
 				}
 			}
 
 			NetHelper.Report(false, $"Withdrew {items.Count} items");
+
+			foreach (var (item, stack) in moduleConsumptionPlan) {
+				item.stack -= stack;
+				if (item.stack <= 0)
+					item.TurnToAir();
+			}
 
 			NetHelper.Report(false, $"Depositing {results.Count} items...");
 
@@ -554,11 +616,11 @@ namespace MagicStorage
 					items.Add(result);
 			}
 
-			ReturnFromMethod:
 			if (items.Count > 0)
 				NetHelper.Report(false, $"Operation had {items.Count} leftover items");
 
-			return items;
+			excessItems = items;
+			return true;
 		}
 
 		internal static bool TryDepositResult(Item item)

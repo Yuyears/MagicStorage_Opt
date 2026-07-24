@@ -845,6 +845,26 @@ Mods: {
 		SearchName: Pesquisar Nome
 		SearchMod: Procurar Mod
 		SortWaiting: Carregando...
+		/* RefreshThreadError:
+			'''
+			An error occurred while refreshing a Magic Storage UI.
+			Check tModLoader-Logs/client.log for more information.
+			''' */
+
+		RefreshTasks: {
+			// PopulatingCaches: Populating caches
+			// CountingItems: Counting items
+			// RefreshingRecipes: Refreshing recipes
+			// RefreshingItems: Refreshing items
+			// ProcessingRecipes: Processing recipes
+			// ProcessingShimmerableItems: Processing shimmerable items
+			// SortingRecipes: Sorting recipes
+			// SortingShimmerableItems: Sorting shimmerable items
+			// PopulatingStoredIngredients: Populating stored ingredients
+			// AggregatingStoredIngredients: Aggregating stored ingredients
+			// AggregatingResultItems: Aggregating result items
+			// UpdatingCaches: Updating caches
+		}
 
 		SearchTips: {
 			SearchName: Pesquisar nome

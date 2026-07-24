@@ -24,6 +24,7 @@ using MagicStorage.Items;
 using MagicStorage.Common.Systems.Auditing;
 using MagicStorage.NPCs;
 using MagicStorage.Common;
+using MagicStorage.CrossMod.Storage;
 
 namespace MagicStorage
 {
@@ -32,6 +33,8 @@ namespace MagicStorage
 		private static bool queueUpdates;
 		private static readonly Queue<int> updateQueue = new();
 		private static readonly HashSet<int> updateQueueContains = new();
+		private static int cachedRecipeTableCount = -1;
+		private static ulong cachedRecipeTableDigest;
 
 		[Conditional("NETPLAY")]
 		public static void Report(bool reportTime, string message) {
@@ -70,7 +73,20 @@ namespace MagicStorage
 			MagicStorageMod.Instance.Logger.Debug(sb.ToString());
 		}
 
-		public static void HandlePacket(BinaryReader reader, int sender)
+		public static void HandlePacket(BinaryReader reader, int sender) => TryHandlePacket(reader, sender, logMalformed: true);
+
+		internal static bool TryHandlePacket(BinaryReader reader, int sender, bool logMalformed = false) {
+			try {
+				HandlePacketCore(reader, sender);
+				return true;
+			} catch (Exception exception) when (exception is EndOfStreamException or InvalidDataException or FormatException) {
+				if (logMalformed)
+					MagicStorageMod.Instance.Logger.Warn($"Rejected malformed packet from sender {sender}: {exception.Message}");
+				return false;
+			}
+		}
+
+		private static void HandlePacketCore(BinaryReader reader, int sender)
 		{
 			MessageType type = (MessageType)reader.ReadByte();
 			if (!InboundPacketGuard.Accept(type, sender)) {
@@ -91,17 +107,17 @@ namespace MagicStorage
 				case MessageType.SearchAndRefreshNetwork:
 					ReceiveSearchAndRefresh(reader);
 					break;
-				case MessageType.ClinetStorageOperation:
-					ReciveClientStorageOperation(reader, sender);
+				case MessageType.ClientStorageOperation:
+					ReceiveClientStorageOperation(reader, sender);
 					break;
 				case MessageType.ServerStorageResult:
-					ReciveServerStorageResult(reader);
+					ReceiveServerStorageResult(reader);
 					break;
 				case MessageType.RefreshNetworkItems:
 					ReceiveRefreshNetworkItems(reader);
 					break;
-				case MessageType.ClientSendTEUpdate:
-					ReceiveClientSendTEUpdate(reader, sender);
+				case MessageType.ClientStorageComponentOperation:
+					ReceiveStorageComponentOperation(reader, sender);
 					break;
 				case MessageType.ClientSendDeactivate:
 					ReceiveClientDeactivate(reader, sender);
@@ -121,14 +137,17 @@ namespace MagicStorage
 				case MessageType.CraftResult:
 					ReceiveCraftResult(reader);
 					break;
+				case MessageType.CraftOutcome:
+					ReceiveCraftOutcome(reader);
+					break;
 				case MessageType.SectionRequest:
 					ReceiveClientRequestSection(reader, sender);
 					break;
-				case MessageType.SyncStorageUnitToClinet:
-					ClientReciveStorageSync(reader);
+				case MessageType.SyncStorageUnitToClient:
+					ClientReceiveStorageSync(reader);
 					break;
 				case MessageType.SyncStorageUnit:
-					ServerReciveSyncStorageUnit(reader, sender);
+					ServerReceiveSyncStorageUnit(reader, sender);
 					break;
 				case MessageType.ForceCraftingGUIRefresh:
 					ReceiveClientForceCraftingGUIRefresh(reader, sender);
@@ -193,6 +212,9 @@ namespace MagicStorage
 					break;
 				case MessageType.RequestShimmerItemInStorage:
 					ServerReceiveItemShimmeringRequest(reader, sender);
+					break;
+				case MessageType.ShimmerItemInStorageResult:
+					ClientReceiveItemShimmeringResult(reader);
 					break;
 				case MessageType.RenameStorageHeart:
 					ReceiveStorageHeartName(reader, sender);
@@ -276,7 +298,7 @@ namespace MagicStorage
 			}
 		}
 
-		public static void ServerReciveSyncStorageUnit(BinaryReader reader, int remoteClient)
+		public static void ServerReceiveSyncStorageUnit(BinaryReader reader, int remoteClient)
 		{
 			if (Main.netMode == NetmodeID.Server)
 			{
@@ -291,13 +313,16 @@ namespace MagicStorage
 				storageUnit.FullySync();
 
 				ModPacket packet = MagicStorageMod.Instance.GetPacket();
-				packet.Write((byte)MessageType.SyncStorageUnitToClinet);
+				packet.Write((byte)MessageType.SyncStorageUnitToClient);
 				TileEntity.Write(packet, storageUnit, true);
 				packet.Send(remoteClient);
 
 				Report(true, MessageType.SyncStorageUnit + " packet received by server from client " + remoteClient);
 			}
 		}
+
+		[Obsolete("Use ServerReceiveSyncStorageUnit instead")]
+		public static void ServerReciveSyncStorageUnit(BinaryReader reader, int remoteClient) => ServerReceiveSyncStorageUnit(reader, remoteClient);
 
 		public static void SendComponentPlace(int i, int j, int type)
 		{
@@ -370,7 +395,7 @@ namespace MagicStorage
 			Report(false, "Refresh origin: (" + point.X + ", " + point.Y + ")");
 		}
 
-		public static void ReciveClientStorageOperation(BinaryReader reader, int sender)
+		public static void ReceiveClientStorageOperation(BinaryReader reader, int sender)
 		{
 			Point16 position = new(reader.ReadInt16(), reader.ReadInt16());
 			TEStorageHeart.Operation op = (TEStorageHeart.Operation)reader.ReadByte();
@@ -382,68 +407,59 @@ namespace MagicStorage
 			// NOTE: If not the server, the data will be read but not enqueued
 			heart.QClientOperation(reader, op, sender);
 
-			Report(true, MessageType.ClinetStorageOperation + " packet recieved by client " + Main.myPlayer);
+			Report(true, MessageType.ClientStorageOperation + " packet received by client " + Main.myPlayer);
 			Report(false, "Operation: " + op);
 		}
 
-		public static void ReciveServerStorageResult(BinaryReader reader)
-		{
-			TEStorageHeart.Operation op = (TEStorageHeart.Operation)reader.ReadByte();
+		[Obsolete("Use ReceiveClientStorageOperation instead")]
+		public static void ReciveClientStorageOperation(BinaryReader reader, int sender) => ReceiveClientStorageOperation(reader, sender);
 
+		public static void ReceiveServerStorageResult(BinaryReader reader) {
+			TEStorageHeart.Operation op = (TEStorageHeart.Operation)reader.ReadByte();
 			Point16 position = reader.ReadPoint16();
+			long operationId = reader.ReadInt64();
+			long revision = reader.ReadInt64();
 
 			if (!TileEntity.ByPosition.TryGetValue(position, out TileEntity te) || te is not TEStorageHeart heart)
 				goto printReport;
 
-			if (op == TEStorageHeart.Operation.Withdraw || op == TEStorageHeart.Operation.WithdrawToInventory || op == TEStorageHeart.Operation.Deposit)
-			{
-				Item item  = ItemIO.Receive(reader, true, true);
-				
-				if (Main.netMode == NetmodeID.MultiplayerClient)
+			bool acceptResult = heart.AcceptNetworkRevision(revision);
+			if (op == TEStorageHeart.Operation.Withdraw || op == TEStorageHeart.Operation.WithdrawToInventory || op == TEStorageHeart.Operation.Deposit) {
+				Item item = ItemIO.Receive(reader, true, true);
+				if (Main.netMode == NetmodeID.MultiplayerClient && acceptResult)
 					StoragePlayer.GetItem(new EntitySource_TileEntity(heart), item, op != TEStorageHeart.Operation.WithdrawToInventory);
-			}
-			else if (op == TEStorageHeart.Operation.DepositAll)
-			{
+			} else if (op == TEStorageHeart.Operation.DepositAll) {
 				int count = reader.ReadInt32();
-				for (int k = 0; k < count; k++)
-				{
-					Item item  = ItemIO.Receive(reader, true, true);
-					
-					if (Main.netMode == NetmodeID.MultiplayerClient)
+				for (int k = 0; k < count; k++) {
+					Item item = ItemIO.Receive(reader, true, true);
+					if (Main.netMode == NetmodeID.MultiplayerClient && acceptResult)
 						StoragePlayer.GetItem(new EntitySource_TileEntity(heart), item, false);
 				}
-			}
-			else if (op == TEStorageHeart.Operation.WithdrawAllAndDestroy)
-			{
+			} else if (op == TEStorageHeart.Operation.WithdrawAllAndDestroy) {
 				int type = reader.ReadInt32();
-
-				if (Main.netMode == NetmodeID.MultiplayerClient)
+				if (Main.netMode == NetmodeID.MultiplayerClient && acceptResult)
 					heart.WithdrawManyAndDestroy(type, out _, net: true);
-			}
-			else if (op == TEStorageHeart.Operation.DeleteUnloadedGlobalItemData)
-			{
-				if (Main.netMode == NetmodeID.MultiplayerClient)
+			} else if (op == TEStorageHeart.Operation.DeleteUnloadedGlobalItemData) {
+				if (Main.netMode == NetmodeID.MultiplayerClient && acceptResult)
 					heart.DestroyUnloadedGlobalItemData(out _, net: true);
-			}
-			else if (op == TEStorageHeart.Operation.WithdrawThenTryModuleInventory || op == TEStorageHeart.Operation.WithdrawToInventoryThenTryModuleInventory)
-			{
-				Item item  = ItemIO.Receive(reader, true, true);
+			} else if (op == TEStorageHeart.Operation.WithdrawThenTryModuleInventory || op == TEStorageHeart.Operation.WithdrawToInventoryThenTryModuleInventory) {
+				Item item = ItemIO.Receive(reader, true, true);
 				Item requested = ItemIO.Receive(reader, true, true);
-
-				if (item.IsAir)
+				if (acceptResult && item.IsAir)
 					item = CraftingGUI.TryToWithdrawFromModuleItems(heart, requested, wasAlreadyCloned: true);
-
-				if (Main.netMode == NetmodeID.MultiplayerClient)
+				if (Main.netMode == NetmodeID.MultiplayerClient && acceptResult)
 					StoragePlayer.GetItem(new EntitySource_TileEntity(heart), item, op != TEStorageHeart.Operation.WithdrawToInventoryThenTryModuleInventory);
 			}
 
-			heart.netcodeUpdate = false;
-			heart.netDesync = 0;
+			heart.CompleteClientOperation(operationId);
 
-printReport:
+		printReport:
 			Report(true, MessageType.ServerStorageResult + " packet received by client " + Main.myPlayer);
 			Report(false, "Operation: " + op);
 		}
+
+		[Obsolete("Use ReceiveServerStorageResult instead")]
+		public static void ReciveServerStorageResult(BinaryReader reader) => ReceiveServerStorageResult(reader);
 
 		public static void SendRefreshNetworkItems(Point16 position, bool ignoreSpecificRefreshes = false, IEnumerable<int> typesToRefresh = null)
 		{
@@ -453,6 +469,7 @@ printReport:
 				packet.Write((byte)MessageType.RefreshNetworkItems);
 				packet.Write(position.X);
 				packet.Write(position.Y);
+				packet.Write(position.ResolveToTileEntity() is TEStorageHeart heart ? heart.NetworkRevision : 0L);
 
 				if (typesToRefresh is null || !typesToRefresh.Any())
 					packet.Write((ushort)0);
@@ -475,6 +492,7 @@ printReport:
 		private static void ReceiveRefreshNetworkItems(BinaryReader reader)
 		{
 			Point16 position = new(reader.ReadInt16(), reader.ReadInt16());
+			long revision = reader.ReadInt64();
 			int count = reader.ReadUInt16();
 
 			List<int> types = new();
@@ -486,13 +504,13 @@ printReport:
 			if (Main.netMode == NetmodeID.Server)
 				return;
 
-			if (position.ResolveToTileEntity() is TEStorageHeart heart && StoragePlayer.IsClientViewingHeart(heart)) {
+			if (position.ResolveToTileEntity() is TEStorageHeart heart && StoragePlayer.IsClientViewingHeart(heart) && heart.AcceptNetworkRevision(revision)) {
 				MagicUI.IgnoreSpecificZoneRefreshing = ignoreSpecificRefreshes;
 				MagicUI.SetNextCollectionsToRefresh(types);
-				MagicUI.RequestMainZoneThread();
-
-				heart.netcodeUpdate = false;
-				heart.netDesync = 0;
+				if (MagicUI.IsDecraftingUIOpen() && (ignoreSpecificRefreshes || types.Contains(DecraftingGUI.selectedItem) || types.Any(DecraftingGUI.IsItemValidForResult)))
+					MagicUI.RequestFullRefresh();
+				else
+					MagicUI.RequestMainZoneThread();
 			}
 
 			Report(true, MessageType.RefreshNetworkItems + " packet received by client " + Main.myPlayer);
@@ -520,11 +538,19 @@ printReport:
 
 			if (Main.netMode == NetmodeID.Server)
 			{
-				if (InboundPacketGuard.TryGetStorageEntity(position, sender, out TEStorageUnit storageUnit, out TEStorageHeart heart, requireInteractionRange: true))
+				Player player = Main.player[sender];
+				if (player.HeldItem.type == ModContent.ItemType<StorageDeactivator>()
+				&& InboundPacketGuard.TryGetStorageEntity(position, sender, out TEStorageUnit storageUnit, out TEStorageHeart heart, requireInteractionRange: true)
+				&& storageUnit.IsTileValidForEntity(position.X, position.Y)
+				&& storageUnit.Inactive != inActive)
 				{
 					storageUnit.Inactive = inActive;
 					storageUnit.UpdateTileFrameWithNetSend();
 					heart.ResetCompactStage();
+					if (inActive)
+						AuditSystem.ReportStorageUnitDeactivation(sender, storageUnit);
+					else
+						AuditSystem.ReportStorageUnitActivation(sender, storageUnit);
 				}
 
 				Report(true, MessageType.ClientSendDeactivate + " packet received by server from client " + sender);
@@ -537,45 +563,100 @@ printReport:
 			}
 		}
 
-		public static void ClientSendTEUpdate(Point16 position)
-		{
-			if (Main.netMode == NetmodeID.MultiplayerClient && position.ResolveToTileEntity() is TileEntity entity)
-			{
-				ModPacket packet = MagicStorageMod.Instance.GetPacket();
-				packet.Write((byte)MessageType.ClientSendTEUpdate);
-				packet.Write(position.X);
-				packet.Write(position.Y);
-				TileEntity.Write(packet, entity, true);
-				packet.Send();
+		private static ModPacket PrepareStorageComponentOperation(StorageComponentOperation operation) {
+			ModPacket packet = MagicStorageMod.Instance.GetPacket();
+			packet.Write((byte)MessageType.ClientStorageComponentOperation);
+			packet.Write((byte)operation);
+			return packet;
+		}
 
-				Report(true, MessageType.ClientSendTEUpdate + " packet sent from client " + Main.myPlayer);
+		public static void RequestRemoteAccessLink(Point16 remotePosition, Point16 heartPosition) {
+			if (Main.netMode != NetmodeID.MultiplayerClient)
+				return;
+
+			ModPacket packet = PrepareStorageComponentOperation(StorageComponentOperation.RemoteAccessLink);
+			packet.Write(remotePosition);
+			packet.Write(heartPosition);
+			packet.Send();
+		}
+
+		public static void SetEnvironmentModuleEnabled(TEEnvironmentAccess access, EnvironmentModule module, bool enabled) {
+			if (Main.netMode != NetmodeID.MultiplayerClient) {
+				access.SetEnabled(module, enabled);
+				return;
+			}
+
+			ModPacket packet = PrepareStorageComponentOperation(StorageComponentOperation.EnvironmentModuleToggle);
+			packet.Write(access.Position);
+			packet.Write(module.Type);
+			packet.Write(enabled);
+			packet.Send();
+		}
+
+		private static void ReceiveStorageComponentOperation(BinaryReader reader, int sender) {
+			StorageComponentOperation operation = (StorageComponentOperation)reader.ReadByte();
+			if (GetStorageComponentOperationPayloadLength(operation) < 0) {
+				Report(true, $"Rejected malformed storage component operation {(byte)operation}");
+				return;
+			}
+
+			switch (operation) {
+				case StorageComponentOperation.RemoteAccessLink:
+					ReceiveRemoteAccessLink(reader, sender);
+					break;
+				case StorageComponentOperation.EnvironmentModuleToggle:
+					ReceiveEnvironmentModuleToggle(reader, sender);
+					break;
 			}
 		}
 
-		public static void ReceiveClientSendTEUpdate(BinaryReader reader, int sender)
-		{
-			Point16 position = new(reader.ReadInt16(), reader.ReadInt16());
-			TileEntity ent = TileEntity.Read(reader, true);
+		internal static int GetStorageComponentOperationPayloadLength(StorageComponentOperation operation) => operation switch {
+				StorageComponentOperation.RemoteAccessLink => 8,
+				StorageComponentOperation.EnvironmentModuleToggle => 9,
+				_ => -1
+			};
 
-			if (Main.netMode == NetmodeID.Server)
-			{
-				ent.Position = position;
-				TileEntity.ByID[ent.ID] = ent;
-				TileEntity.ByPosition[position] = ent;
-				if (ent is TEStorageUnit storageUnit)
-				{
-					TEStorageHeart heart = storageUnit.GetHeart();
-					heart?.ResetCompactStage();
-				}
+		private static void ReceiveRemoteAccessLink(BinaryReader reader, int sender) {
+			Point16 remotePosition = reader.ReadPoint16();
+			Point16 heartPosition = reader.ReadPoint16();
+			Player player = Main.player[sender];
+			Item heldItem = player.HeldItem;
 
-				Report(true, MessageType.ClientSendTEUpdate + " packet received by server from client " + sender);
-
-				NetMessage.SendData(MessageID.TileEntitySharing, -1, sender, null, ent.ID, ent.Position.X, ent.Position.Y);
+			if (!player.active
+			|| remotePosition.ResolveToTileEntity() is not TERemoteAccess remoteAccess
+			|| heartPosition.ResolveToTileEntity() is not TEStorageHeart heart
+			|| !remoteAccess.IsTileValidForEntity(remotePosition.X, remotePosition.Y)
+			|| !heart.IsTileValidForEntity(heartPosition.X, heartPosition.Y)
+			|| remoteAccess.StorageCenter != Point16.NegativeOne
+			|| !InboundPacketGuard.IsWithinTileRange(player.Center.ToTileCoordinates(), remotePosition, player.lastTileRangeX, player.lastTileRangeY)
+			|| !SecuritySystem.CanPlayerAccessImmediately(player, remoteAccess.assignedNetwork)
+			|| !SecuritySystem.CanPlayerAccessImmediately(player, heart.assignedNetwork)
+			|| heldItem.type != ModContent.ItemType<Locator>() && heldItem.type != ModContent.ItemType<LocatorDisk>()
+			|| heldItem.ModItem is not Locator locator
+			|| locator.Location != heartPosition
+			|| !remoteAccess.TryLocate(heartPosition, out _)) {
+				Report(true, $"Rejected remote access link from player {sender}");
+				return;
 			}
-			else if (Main.netMode == NetmodeID.MultiplayerClient)
-			{
-				Report(true, MessageType.ClientSendTEUpdate + " packet received by client " + Main.myPlayer);
+
+			AuditSystem.ReportRemoteAccessLink(sender, heart, remoteAccess);
+		}
+
+		private static void ReceiveEnvironmentModuleToggle(BinaryReader reader, int sender) {
+			Point16 position = reader.ReadPoint16();
+			int moduleType = reader.ReadInt32();
+			bool enabled = reader.ReadBoolean();
+
+			if (!InboundPacketGuard.TryGetStorageEntity(position, sender, out TEEnvironmentAccess access, out _, requireInteractionRange: true)
+			|| !access.IsTileValidForEntity(position.X, position.Y)
+			|| EnvironmentModuleLoader.Get(moduleType) is not EnvironmentModule module
+			|| !module.IsAvailable()) {
+				Report(true, $"Rejected environment module toggle from player {sender}");
+				return;
 			}
+
+			access.SetEnabled(module, enabled);
+			SendTEUpdate(access.ID, access.Position);
 		}
 
 		private static ModPacket PrepareStationOperation(Point16 position, byte op)
@@ -601,7 +682,7 @@ printReport:
 			if (Main.netMode == NetmodeID.MultiplayerClient)
 			{
 				ModPacket packet = PrepareStationOperation(position, 0);
-				ItemIO.Send(item, packet, true, true);
+				packet.Write((byte)Main.LocalPlayer.selectedItem);
 				packet.Send();
 
 				Report(true, "SendDepositStation packet sent from client " + Main.myPlayer);
@@ -625,7 +706,9 @@ printReport:
 			Point16 position = new(reader.ReadInt16(), reader.ReadInt16());
 			TECraftingAccess.Operation op = (TECraftingAccess.Operation)reader.ReadByte();
 
-			if (!TileEntity.ByPosition.TryGetValue(position, out TileEntity te) || te is not TECraftingAccess craftingAccess)
+			if (!Enum.IsDefined(op)
+			|| !InboundPacketGuard.TryGetStorageEntity(position, sender, out TECraftingAccess craftingAccess, out _, requireInteractionRange: true)
+			|| !craftingAccess.IsTileValidForEntity(position.X, position.Y))
 				return;
 
 			craftingAccess.QClientOperation(reader, op, sender);
@@ -656,8 +739,10 @@ printReport:
 
 				if (Main.netMode == NetmodeID.MultiplayerClient)
 				{
+					Main.LocalPlayer.inventory[TECraftingAccess.DepositInventorySlot] = item.Clone();
 					Main.mouseItem = item;
-					TECraftingAccess.UpdateRecipesFromStationAction(new Item(oldType));
+					if (oldType > ItemID.None)
+						TECraftingAccess.UpdateRecipesFromStationAction(new Item(oldType));
 				}
 			}
 
@@ -693,89 +778,239 @@ printReport:
 			}
 			else if (Main.netMode == NetmodeID.MultiplayerClient)
 			{
-				Report(true, MessageType.ResetCompactStage + " packet recevied by client " + Main.myPlayer);
+				Report(true, MessageType.ResetCompactStage + " packet received by client " + Main.myPlayer);
 			}
 		}
 
-		public static void SendCraftRequest(Point16 heart, List<Item> toWithdraw, List<Item> results)
+		internal const int CraftRequestPayloadLength = sizeof(short) * 2 + sizeof(long) + sizeof(int) * 3 + sizeof(sbyte) + sizeof(ulong) * 2;
+
+		internal static void WriteCraftRequestPayload(BinaryWriter writer, Point16 craftingAccess, long operationId, int recipeIndex, int requestedAmount, int recursionDepth, ulong recipeFingerprint, int recipeCount, ulong recipeTableDigest) {
+			writer.Write(craftingAccess.X);
+			writer.Write(craftingAccess.Y);
+			writer.Write(operationId);
+			writer.Write(recipeIndex);
+			writer.Write(requestedAmount);
+			writer.Write((sbyte)recursionDepth);
+			writer.Write(recipeFingerprint);
+			writer.Write(recipeCount);
+			writer.Write(recipeTableDigest);
+		}
+
+		internal static void ReadCraftRequestPayload(BinaryReader reader, out Point16 craftingAccess, out long operationId, out int recipeIndex, out int requestedAmount, out int recursionDepth, out ulong recipeFingerprint, out int recipeCount, out ulong recipeTableDigest) {
+			craftingAccess = new(reader.ReadInt16(), reader.ReadInt16());
+			operationId = reader.ReadInt64();
+			recipeIndex = reader.ReadInt32();
+			requestedAmount = reader.ReadInt32();
+			recursionDepth = reader.ReadSByte();
+			recipeFingerprint = reader.ReadUInt64();
+			recipeCount = reader.ReadInt32();
+			recipeTableDigest = reader.ReadUInt64();
+		}
+
+		internal static bool TryReadCraftRequestPayload(BinaryReader reader, out Point16 craftingAccess, out long operationId, out int recipeIndex, out int requestedAmount, out int recursionDepth, out ulong recipeFingerprint, out int recipeCount, out ulong recipeTableDigest) {
+			try {
+				ReadCraftRequestPayload(reader, out craftingAccess, out operationId, out recipeIndex, out requestedAmount, out recursionDepth, out recipeFingerprint, out recipeCount, out recipeTableDigest);
+				return true;
+			} catch (Exception exception) when (exception is EndOfStreamException or InvalidDataException or FormatException) {
+				craftingAccess = default;
+				operationId = default;
+				recipeIndex = default;
+				requestedAmount = default;
+				recursionDepth = default;
+				recipeFingerprint = default;
+				recipeCount = default;
+				recipeTableDigest = default;
+				return false;
+			}
+		}
+
+		internal static ulong GetRecipeTableDigest() {
+			if (cachedRecipeTableCount == Recipe.numRecipes)
+				return cachedRecipeTableDigest;
+
+			const ulong offset = 14695981039346656037UL;
+			const ulong prime = 1099511628211UL;
+			ulong digest = offset;
+			for (int i = 0; i < Recipe.numRecipes; i++) {
+				Recipe recipe = Main.recipe[i];
+				unchecked {
+					digest = (digest ^ GetRecipeFingerprint(recipe)) * prime;
+					digest = (digest ^ (uint)i) * prime;
+				}
+				foreach (char character in recipe.Mod?.Name ?? "Terraria")
+					unchecked { digest = (digest ^ character) * prime; }
+			}
+
+			cachedRecipeTableCount = Recipe.numRecipes;
+			return cachedRecipeTableDigest = digest;
+		}
+
+		internal static void ClearRecipeTableDigestCache() {
+			cachedRecipeTableCount = -1;
+			cachedRecipeTableDigest = 0;
+		}
+
+		internal static ulong GetRecipeFingerprint(Recipe recipe) {
+			const ulong offset = 14695981039346656037UL;
+			ulong hash = offset;
+
+			static void Mix(ref ulong hash, int value) {
+				const ulong prime = 1099511628211UL;
+				unchecked {
+					hash = (hash ^ (uint)value) * prime;
+					hash = (hash ^ (uint)(value >> 16)) * prime;
+				}
+			}
+
+			Mix(ref hash, recipe.createItem.type);
+			Mix(ref hash, recipe.createItem.stack);
+			Mix(ref hash, recipe.requiredItem.Count);
+			foreach (Item item in recipe.requiredItem) {
+				Mix(ref hash, item.type);
+				Mix(ref hash, item.stack);
+			}
+			Mix(ref hash, recipe.requiredTile.Count);
+			foreach (int tile in recipe.requiredTile)
+				Mix(ref hash, tile);
+			Mix(ref hash, recipe.acceptedGroups.Count);
+			foreach (int group in recipe.acceptedGroups)
+				Mix(ref hash, group);
+
+			return hash;
+		}
+
+		internal static bool IsValidCraftRequest(int recipeIndex, int requestedAmount, int recursionDepth, int recipeCount)
+			=> recipeIndex >= 0 && recipeIndex < recipeCount
+			&& requestedAmount > 0 && requestedAmount <= Item.CommonMaxStack
+			&& MagicStorageConfig.IsValidRecursionDepth(recursionDepth);
+
+		public static bool SendCraftRequest(Point16 craftingAccess, int recipeIndex, int requestedAmount)
 		{
 			if (Main.netMode == NetmodeID.MultiplayerClient)
 			{
+				if (recipeIndex < 0 || recipeIndex >= Main.recipe.Length || StoragePlayer.LocalPlayer.GetStorageHeart() is not TEStorageHeart heart || heart.HasPendingOperation(TEStorageHeart.PendingOperationKind.Craft))
+					return false;
+				long operationId = heart.BeginClientOperation(TEStorageHeart.PendingOperationKind.Craft);
 				ModPacket packet = MagicStorageMod.Instance.GetPacket();
 				packet.Write((byte)MessageType.CraftRequest);
-				packet.Write(heart.X);
-				packet.Write(heart.Y);
-				packet.Write(toWithdraw.Count);
-				foreach (Item item in toWithdraw)
-					ItemIO.Send(item, packet, true, true);
-				packet.Write(results.Count);
-				foreach (Item result in results)
-					ItemIO.Send(result, packet, true, true);
+				WriteCraftRequestPayload(packet, craftingAccess, operationId, recipeIndex, requestedAmount, MagicStorageConfig.RecipeRecursionDepth, GetRecipeFingerprint(Main.recipe[recipeIndex]), Recipe.numRecipes, GetRecipeTableDigest());
 				packet.Send();
 
 				Report(true, MessageType.CraftRequest + " packet sent from client " + Main.myPlayer);
+				return true;
 			}
+
+			return false;
 		}
 
 		public static void ReceiveCraftRequest(BinaryReader reader, int sender)
 		{
-			Point16 position = new(reader.ReadInt16(), reader.ReadInt16());
-			int withdrawCount = reader.ReadInt32();
-			if (!InboundPacketGuard.IsValidCount(withdrawCount, InboundPacketGuard.MaxItemEntries)
-			|| !InboundPacketGuard.TryGetStorageEntity(position, sender, out TEStorageHeart heart, out _))
+			if (!TryReadCraftRequestPayload(reader, out Point16 position, out long operationId, out int recipeIndex, out int requestedAmount, out int recursionDepth, out ulong recipeFingerprint, out int recipeCount, out ulong recipeTableDigest)) {
+				Report(true, $"Rejected truncated {MessageType.CraftRequest} packet from player {sender}");
 				return;
-
-		//	PrintClientRequest(sender, "Craft", position);
-
-			HashSet<int> typesToUpdate = new();
-
-			List<Item> toWithdraw = new();
-			for (int k = 0; k < withdrawCount; k++) {
-				Item withdrawn = ItemIO.Receive(reader, true, true);
-				toWithdraw.Add(withdrawn);
-				typesToUpdate.Add(withdrawn.type);
 			}
-
-			int resultsCount = reader.ReadInt32();
-			if (!InboundPacketGuard.IsValidCount(resultsCount, InboundPacketGuard.MaxItemEntries))
+			if (!IsValidCraftRequest(recipeIndex, requestedAmount, recursionDepth, Main.recipe.Length)) {
+				SendCraftOutcome(sender, operationId, position, null, false, 0, CraftRejectionReason.InvalidRequest, [], []);
 				return;
-
-			List<Item> results = new();
-			for (int k = 0; k < resultsCount; k++) {
-				Item result = ItemIO.Receive(reader, true, true);
-				results.Add(result);
-				typesToUpdate.Add(result.type);
+			}
+			if (recipeCount != Recipe.numRecipes || recipeTableDigest != GetRecipeTableDigest() || GetRecipeFingerprint(Main.recipe[recipeIndex]) != recipeFingerprint) {
+				MagicStorageMod.Instance.Logger.Warn($"Rejected craft operation={operationId}: recipe table/fingerprint mismatch clientCount={recipeCount} serverCount={Recipe.numRecipes} clientDigest={recipeTableDigest:X16} serverDigest={GetRecipeTableDigest():X16}");
+				SendCraftOutcome(sender, operationId, position, null, false, 0, CraftRejectionReason.RecipeMismatch, [], []);
+				return;
+			}
+			if (!InboundPacketGuard.TryGetStorageEntity(position, sender, out TECraftingAccess access, out TEStorageHeart heart)) {
+				SendCraftOutcome(sender, operationId, position, null, false, 0, CraftRejectionReason.AccessDenied, [], []);
+				return;
 			}
 
 			Report(true, MessageType.CraftRequest + " packet received by server from client " + sender);
 
-			Report(false, "Handling storage inventory changes and sending excess items...");
+			if (!CraftingGUI.QueueCraftOnServer(sender, operationId, heart, access, Main.recipe[recipeIndex], requestedAmount, recursionDepth)) {
+				Report(true, $"Rejected craft request from player {sender}: recipe={recipeIndex}, amount={requestedAmount}");
+				SendCraftOutcome(sender, operationId, position, heart, false, 0, CraftRejectionReason.QueueFull, [], []);
+			}
+		}
 
-			List<Item> items;
-			using (SecuritySystem.CreateAccessContext(sender))
-				items = CraftingGUI.HandleCraftWithdrawAndDeposit(heart, toWithdraw, results);
+		internal static void CompleteCraftRequest(int sender, long operationId, TEStorageHeart heart, bool accepted, int requestedAmount, CraftRejectionReason reason, List<Item> items, List<Item> results, List<Item> consumed) {
+			HashSet<int> typesToUpdate = accepted ? [.. results.Concat(consumed).Select(static item => item.type)] : [];
+			if (accepted)
+				AuditSystem.ReportCraftRequest(sender, heart, [.. results], [.. consumed]);
+			else
+				Report(true, $"Rejected queued craft operation={operationId} from player {sender}: {reason}");
 
-			if (items.Count > 0)
-			{
-				ModPacket packet = MagicStorageMod.Instance.GetPacket();
-				packet.Write((byte)MessageType.CraftResult);
-				packet.Write(items.Count);
-				foreach (Item item in items)
-					ItemIO.Send(item, packet, true, true);
-				packet.Send(sender);
+			SendCraftOutcome(sender, operationId, heart.Position, heart, accepted, accepted ? requestedAmount : 0, accepted ? CraftRejectionReason.None : reason, typesToUpdate, items);
+			if (accepted)
+				SendRefreshNetworkItems(heart.Position, false, typesToUpdate);
+		}
 
-				Report(false, MessageType.CraftResult + " packet sent to all clients");
+		private static void SendCraftOutcome(int client, long operationId, Point16 position, TEStorageHeart heart, bool accepted, int acceptedAmount, CraftRejectionReason reason, IReadOnlyCollection<int> affectedTypes, IReadOnlyCollection<Item> excessItems) {
+			long revision = accepted && heart is not null ? heart.AdvanceNetworkRevision() : heart?.NetworkRevision ?? 0;
+			ModPacket packet = MagicStorageMod.Instance.GetPacket();
+			packet.Write((byte)MessageType.CraftOutcome);
+			packet.Write(operationId);
+			packet.Write(position);
+			packet.Write(revision);
+			packet.Write(accepted);
+			packet.Write(acceptedAmount);
+			packet.Write((byte)reason);
+			packet.Write((ushort)Math.Min(affectedTypes.Count, InboundPacketGuard.MaxItemEntries));
+			foreach (int type in affectedTypes.Take(InboundPacketGuard.MaxItemEntries))
+				packet.Write(type);
+			packet.Write(Math.Min(excessItems.Count, InboundPacketGuard.MaxItemEntries));
+			foreach (Item item in excessItems.Take(InboundPacketGuard.MaxItemEntries))
+				ItemIO.Send(item, packet, true, true);
+			packet.Send(client);
+		}
 
-				AuditSystem.ReportCraftRequest(sender, heart, [.. results], [.. toWithdraw]);
+		private static void ReceiveCraftOutcome(BinaryReader reader) {
+			long operationId = reader.ReadInt64();
+			Point16 position = reader.ReadPoint16();
+			long revision = reader.ReadInt64();
+			bool accepted = reader.ReadBoolean();
+			int acceptedAmount = reader.ReadInt32();
+			CraftRejectionReason reason = (CraftRejectionReason)reader.ReadByte();
+			int typeCount = reader.ReadUInt16();
+			if (!InboundPacketGuard.IsValidCount(typeCount, InboundPacketGuard.MaxItemEntries))
+				return;
+			int[] affectedTypes = new int[typeCount];
+			for (int i = 0; i < typeCount; i++)
+				affectedTypes[i] = reader.ReadInt32();
+			int itemCount = reader.ReadInt32();
+			if (!InboundPacketGuard.IsValidCount(itemCount, InboundPacketGuard.MaxItemEntries))
+				return;
+			Item[] excessItems = new Item[itemCount];
+			for (int i = 0; i < itemCount; i++)
+				excessItems[i] = ItemIO.Receive(reader, true, true);
+
+			TEStorageHeart heart = position.ResolveToTileEntity() as TEStorageHeart ?? StoragePlayer.LocalPlayer.GetStorageHeart();
+			if (heart is null)
+				return;
+			bool matched = heart.CompleteClientOperation(operationId);
+			if (!matched)
+				return;
+			bool acceptRevision = heart.AcceptNetworkRevision(revision);
+
+			if (accepted && acceptRevision) {
+				foreach (Item item in excessItems)
+					Main.LocalPlayer.QuickSpawnItem(new EntitySource_TileEntity(heart), item, item.stack);
+				MagicUI.SetNextCollectionsToRefresh(affectedTypes);
+				SoundEngine.PlaySound(SoundID.Grab);
+			} else {
+				Report(false, $"Craft operation={operationId} rejected or stale: accepted={accepted}, amount={acceptedAmount}, reason={reason}, revision={revision}");
 			}
 
-			SendRefreshNetworkItems(position, false, typesToUpdate);
+			CraftingGUI.InvalidateSelectedRecipePreviewAfterInventoryChange();
+			CraftingGUI.ForceNextRecipeRefreshToBeFull();
+			CraftingGUI.RequestSelectedRecipeSnapshotForNextRecipeRefresh();
+			MagicUI.RequestFullRefresh();
 		}
 
 		public static void ReceiveCraftResult(BinaryReader reader)
 		{
 			Player player = Main.LocalPlayer;
 			int count = reader.ReadInt32();
+			if (!InboundPacketGuard.IsValidCount(count, InboundPacketGuard.MaxItemEntries))
+				return;
 			for (int k = 0; k < count; k++)
 			{
 				Item item  = ItemIO.Receive(reader, true, true);
@@ -814,12 +1049,15 @@ printReport:
 			}
 		}
 
-		public static void ClientReciveStorageSync(BinaryReader reader)
+		public static void ClientReceiveStorageSync(BinaryReader reader)
 		{
 			TileEntity.Read(reader, true);
 
-			Report(true, MessageType.SyncStorageUnitToClinet + " packet received by client " + Main.myPlayer);
+			Report(true, MessageType.SyncStorageUnitToClient + " packet received by client " + Main.myPlayer);
 		}
+
+		[Obsolete("Use ClientReceiveStorageSync instead")]
+		public static void ClientReciveStorageSync(BinaryReader reader) => ClientReceiveStorageSync(reader);
 
 		public static void ClientRequestForceCraftingGUIRefresh() {
 			if (Main.netMode == NetmodeID.MultiplayerClient && StoragePlayer.LocalPlayer.GetStorageHeart() is TEStorageHeart heart) {
@@ -880,14 +1118,17 @@ printReport:
 			if (Main.netMode != NetmodeID.Server)
 				return;
 
-			if (!InboundPacketGuard.TryGetStorageEntity(destination, sender, out TEStorageUnit unitDestination, out TEStorageHeart destinationHeart)) {
+			if (!InboundPacketGuard.TryGetStorageEntity(destination, sender, out TEStorageUnit unitDestination, out TEStorageHeart destinationHeart, requireInteractionRange: true)) {
 				Report(true, MessageType.TransferItems + " packet failed to read on the server.\n" +
 					"Reason: Destination was not an accessible Storage Unit");
 				return;
 			}
 
-			if (!InboundPacketGuard.TryGetStorageEntity(source, sender, out TEStorageUnit unitSource, out TEStorageHeart sourceHeart)
-			|| sourceHeart.Position != destinationHeart.Position) {
+			if (source == destination
+			|| !InboundPacketGuard.TryGetStorageEntity(source, sender, out TEStorageUnit unitSource, out TEStorageHeart sourceHeart, requireInteractionRange: true)
+			|| sourceHeart.Position != destinationHeart.Position
+			|| !unitSource.IsTileValidForEntity(source.X, source.Y)
+			|| !unitDestination.IsTileValidForEntity(destination.X, destination.Y)) {
 				Report(true, MessageType.TransferItems + " packet failed to read on the server.\n" +
 					"Reason: Source was not an accessible Storage Unit in the same network");
 				return;
@@ -940,7 +1181,7 @@ printReport:
 		public static void SendCoinCompactRequest(Point16 heart) {
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
 			packet.Write((byte)MessageType.RequestCoinCompact);
-			packet.Write(heart);
+			packet.Write(StoragePlayer.LocalPlayer.ViewingStorage());
 			packet.Send();
 
 			Report(true, MessageType.RequestCoinCompact + " packet sent to all clients");
@@ -952,14 +1193,14 @@ printReport:
 			if (Main.netMode == NetmodeID.Server) {
 				using var context = SecuritySystem.CreateAccessContext(sender);
 
-				if (TileEntity.ByPosition.TryGetValue(position, out var te) && te is TEStorageHeart heart) {
+				if (InboundPacketGuard.TryGetStorageEntity(position, sender, out TEStorageComponent _, out TEStorageHeart heart, requireInteractionRange: true)) {
 					heart.CompactCoins();
 					AuditSystem.ReportControlCoinCompacting(sender, heart);
 				}
 				Report(true, MessageType.RequestCoinCompact + " packet received by server from client " + sender);
 				Report(false, "Entity read: (X: " + position.X + ", Y: " + position.Y + ")");
 			} else if (Main.netMode == NetmodeID.MultiplayerClient) {
-				Report(true, MessageType.RequestCoinCompact + " packet recevied by client " + Main.myPlayer);
+				Report(true, MessageType.RequestCoinCompact + " packet received by client " + Main.myPlayer);
 			}
 		}
 
@@ -1016,7 +1257,7 @@ printReport:
 			} else if (Main.netMode == NetmodeID.MultiplayerClient) {
 				SellModeMetadata.Clear();
 
-				Report(true, MessageType.MassDuplicateSellRequest + " packet recevied by client " + Main.myPlayer);
+				Report(true, MessageType.MassDuplicateSellRequest + " packet received by client " + Main.myPlayer);
 			}
 		}
 
@@ -1040,7 +1281,7 @@ printReport:
 
 			Report(true, $"{sold} items were sold/destroyed at heart (X: {heart.X}, Y: {heart.Y}) for {coppersEarned} copper coins");
 
-			Report(false, MessageType.MassDuplicateSellResult + " packet recevied by client " + Main.myPlayer);
+			Report(false, MessageType.MassDuplicateSellResult + " packet received by client " + Main.myPlayer);
 
 			if (sender == Main.myPlayer)
 				SellModeMetadata.ClientReportSell(sold, totalItemsBeforeSell, new SellModeMetadata.Coins(coppersEarned));
@@ -1068,7 +1309,8 @@ printReport:
 
 		//	PrintClientRequest(sender, "Update Unit Type", unit);
 
-			if (!TileEntity.ByPosition.TryGetValue(unit, out TileEntity entity) || entity is not TEStorageUnit storageUnit) {
+			if (!InboundPacketGuard.TryGetStorageEntity(unit, sender, out TEStorageUnit storageUnit, out _, requireInteractionRange: true)
+			|| !storageUnit.IsTileValidForEntity(unit.X, unit.Y)) {
 				Report(true, MessageType.RequestStorageUnitStyle + " packet was malformed: Storage Unit location did not have a Storage Unit");
 				return;
 			}
@@ -1287,7 +1529,7 @@ printReport:
 			return packet;
 		}
 
-		public static void ClientRequestDepositFromBank(Item[] inventory, Point16 heart, Action<Player, Item[]> netResult) {
+		public static void ClientRequestDepositFromBank(Point16 access, PlayerBankInventory inventory, Action<Player, Item[]> netResult) {
 			if (Main.netMode != NetmodeID.MultiplayerClient)
 				return;
 
@@ -1296,12 +1538,8 @@ printReport:
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
 			packet.Write((byte)MessageType.ClientRequestPlayerBankDeposit);
 
-			packet.Write(heart);
-
-			packet.Write((ushort)inventory.Length);
-
-			for (int i = 0; i < inventory.Length; i++)
-				ItemIO.Send(inventory[i], packet, true, true);
+			packet.Write(access);
+			packet.Write((byte)inventory);
 
 			packet.Send();
 
@@ -1309,17 +1547,11 @@ printReport:
 		}
 
 		public static void ServerReceiveDepositFromBankRequest(BinaryReader reader, int sender) {
-			Point16 heart = reader.ReadPoint16();
-
-			int count = reader.ReadUInt16();
-			if (!InboundPacketGuard.IsValidCount(count, InboundPacketGuard.MaxBankEntries)
-			|| !InboundPacketGuard.TryGetStorageEntity(heart, sender, out TEStorageHeart storageHeart, out _))
+			Point16 access = reader.ReadPoint16();
+			PlayerBankInventory inventoryType = (PlayerBankInventory)reader.ReadByte();
+			if (!InboundPacketGuard.TryGetStorageEntity(access, sender, out TEStorageComponent _, out TEStorageHeart storageHeart, requireInteractionRange: true)
+			|| !TryGetPlayerBankInventory(Main.player[sender], inventoryType, out Item[] inventory))
 				return;
-
-			Item[] inventory = new Item[count];
-
-			for (int i = 0; i < count; i++)
-				inventory[i] = ItemIO.Receive(reader, true, true);
 
 			if (Main.netMode != NetmodeID.Server) {
 				Report(true, MessageType.ClientRequestPlayerBankDeposit + " packet received by client " + Main.myPlayer);
@@ -1332,7 +1564,8 @@ printReport:
 			packet.Write((byte)MessageType.PlayerBankDepositResult);
 			packet.Write(changed);
 
-			packet.Write((ushort)inventory.Length);
+			packet.Write((byte)inventoryType);
+			packet.Write((byte)inventory.Length);
 
 			for (int i = 0; i < inventory.Length; i++)
 				ItemIO.Send(inventory[i], packet, true, true);
@@ -1341,12 +1574,15 @@ printReport:
 
 			Report(false, MessageType.PlayerBankDepositResult + " packet sent to client " + sender);
 
-		//	PrintClientRequest(sender, "Deposit Items from Bank/Safe/Forge", heart);
+		//	PrintClientRequest(sender, "Deposit Items from Bank/Safe/Forge", access);
 		}
 
 		public static void ClientReceiveDepositFromBankResult(BinaryReader reader) {
 			bool changed = reader.ReadBoolean();
-			int count = reader.ReadUInt16();
+			PlayerBankInventory inventoryType = (PlayerBankInventory)reader.ReadByte();
+			int count = reader.ReadByte();
+			if (!TryGetPlayerBankInventory(Main.LocalPlayer, inventoryType, out Item[] target) || count != target.Length)
+				return;
 
 			Item[] inventory = new Item[count];
 
@@ -1364,6 +1600,17 @@ printReport:
 				SoundEngine.PlaySound(SoundID.Grab);
 
 			Report(true, MessageType.PlayerBankDepositResult + " packet received by client " + Main.myPlayer);
+		}
+
+		private static bool TryGetPlayerBankInventory(Player player, PlayerBankInventory inventory, out Item[] items) {
+			items = inventory switch {
+				PlayerBankInventory.PiggyBank => player.bank.item,
+				PlayerBankInventory.Safe => player.bank2.item,
+				PlayerBankInventory.DefendersForge => player.bank3.item,
+				PlayerBankInventory.VoidVault => player.bank4.item,
+				_ => null
+			};
+			return items is { Length: > 0 and <= InboundPacketGuard.MaxBankEntries };
 		}
 
 		public static void SendComponentPlacement(Point16 position) {
@@ -1418,7 +1665,7 @@ printReport:
 
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
 			packet.Write((byte)msg);
-			packet.Write(heart.Position);
+			packet.Write(StoragePlayer.LocalPlayer.ViewingStorage());
 			packet.Send();
 
 			Report(true, msg + " packet sent to the server");
@@ -1455,7 +1702,7 @@ printReport:
 
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
 			packet.Write((byte)MessageType.DeleteSpecificItem);
-			packet.Write(heart.Position);
+			packet.Write(StoragePlayer.LocalPlayer.ViewingStorage());
 			ReadOnlySpan<byte> data;
 			using (ObjectSwitch.Create(ref item.stack, 1))
 				data = Utility.ToByteSpanNoCompression(item);
@@ -1468,13 +1715,19 @@ printReport:
 		public static void ServerReceiveExactItemDeletionRequest(BinaryReader reader, int sender) {
 			Point16 point = reader.ReadPoint16();
 			int dataLength = reader.Read7BitEncodedInt();
+			if (dataLength <= 0 || dataLength > InboundPacketGuard.MaxSerializedItemBytes)
+				return;
 			ReadOnlySpan<byte> item = reader.ReadBytes(dataLength);
+			if (item.Length != dataLength)
+				return;
 			int stack = reader.ReadInt32();
 
 			if (Main.netMode != NetmodeID.Server)
 				return;
 
-			if (!TileEntity.ByPosition.TryGetValue(point, out TileEntity entity) || entity is not TEStorageHeart heart)
+			if (stack <= 0
+			|| !Main.player[sender].GetModPlayer<OperatorPlayer>().hasOp
+			|| !InboundPacketGuard.TryGetStorageEntity(point, sender, out TEStorageComponent _, out TEStorageHeart heart, requireInteractionRange: true))
 				return;
 
 			int toRemove = stack;
@@ -1482,48 +1735,95 @@ printReport:
 				AuditSystem.ReportItemDeletion(sender, heart, new ReducedItem(netItem.Type, stack - toRemove));
 		}
 
-		public static void RequestItemShimmering(int itemType, int toShimmer, StorageIntermediary storage, List<IShimmerResult> results) {
+		public static void RequestItemShimmering(TEDecraftingAccess access, int itemType, int toShimmer) {
 			if (Main.netMode != NetmodeID.MultiplayerClient)
 				return;
 
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
 			packet.Write((byte)MessageType.RequestShimmerItemInStorage);
+			packet.Write(access.Position);
 			packet.Write(itemType);
 			packet.Write(toShimmer);
-			storage.Send(packet);
-			ShimmerMetrics.SendShimmerResults(packet, results);
 			packet.Send();
 
 			Report(true, MessageType.RequestShimmerItemInStorage + " packet sent to the server");
 		}
 
 		public static void ServerReceiveItemShimmeringRequest(BinaryReader reader, int sender) {
+			Point16 accessPosition = reader.ReadPoint16();
 			int itemType = reader.ReadInt32();
 			int toShimmer = reader.ReadInt32();
 
-			var storage = StorageIntermediary.Receive(reader);
-			storage.IgnoreContentChanges = true;
-
-			var results = ShimmerMetrics.ReceiveShimmerResults(reader);
-
-			if (Main.netMode != NetmodeID.Server || storage is null)
+			if (Main.netMode != NetmodeID.Server)
 				return;
 
 			Report(true, MessageType.RequestShimmerItemInStorage + " packet received by server from client " + sender);
+			if (!InboundPacketGuard.TryGetStorageEntity(accessPosition, sender, out TEDecraftingAccess access, out TEStorageHeart heart, requireInteractionRange: true)
+			|| !access.IsTileValidForEntity(accessPosition.X, accessPosition.Y)
+			|| itemType <= ItemID.None || itemType >= ItemLoader.ItemCount
+			|| toShimmer <= 0) {
+				SendItemShimmeringResult(sender, accessPosition, itemType, success: false);
+				return;
+			}
+
+			Player player = Main.player[sender];
+			int available = 0;
+			foreach (Item item in heart.GetStoredItems()) {
+				if (item.type == itemType)
+					available = (int)Math.Min(int.MaxValue, (long)available + item.stack);
+			}
+			foreach (EnvironmentModule module in heart.GetModules()) {
+				foreach (Item item in module.GetAdditionalItems(new EnvironmentSandbox(player, heart)) ?? []) {
+					if (item is { IsAir: false } && item.type == itemType)
+						available = (int)Math.Min(int.MaxValue, (long)available + item.stack);
+				}
+			}
+
+			toShimmer = Math.Min(toShimmer, available);
+			if (toShimmer <= 0) {
+				SendItemShimmeringResult(sender, accessPosition, itemType, success: false);
+				return;
+			}
 
 			Item shimmeringItem = new Item(itemType, toShimmer);
 			int iconicItem = MagicCache.ShimmerInfos[itemType].iconicItem;
+			StorageIntermediary storage = new(heart, player.Center, player.Bottom);
+			List<IShimmerResult> results = [];
 
-			Report(false, "Handling shimmer results...");
+			while (!shimmeringItem.IsAir) {
+				IShimmerResult result = ShimmerMetrics.AttemptItemTransmutation(shimmeringItem, storage, net: true);
+				if (result is null)
+					break;
+				results.Add(result);
+			}
 
-			foreach (var result in results)
-				result?.OnShimmer(shimmeringItem, iconicItem, storage, net: true);
+			int shimmered = toShimmer - shimmeringItem.stack;
+			if (shimmered <= 0
+			|| !CraftingGUI.TryPlanServerItemConsumption(player, heart, storage.toWithdraw, out List<Item> withdrawals, out List<Item> moduleConsumptions, out List<Item> moduleItems)) {
+				SendItemShimmeringResult(sender, accessPosition, itemType, success: false);
+				return;
+			}
 
 			Report(false, "Handling storage inventory changes and sending excess items...");
 
 			List<Item> items;
-			using (SecuritySystem.CreateAccessContext(sender))
-				items = CraftingGUI.HandleCraftWithdrawAndDeposit(storage.heart, storage.toWithdraw, storage.toDeposit);
+			using (SecuritySystem.CreateAccessContext(sender)) {
+				if (!CraftingGUI.TryHandleCraftWithdrawAndDeposit(heart, withdrawals, moduleConsumptions, moduleItems, CraftingGUI.CompactItemList(storage.toDeposit), out items)) {
+					SendItemShimmeringResult(sender, accessPosition, itemType, success: false);
+					return;
+				}
+			}
+
+			Item effectItem = new(itemType, shimmered);
+			StorageIntermediary effectStorage = new(heart, player.Center, player.Bottom) { IgnoreContentChanges = true };
+			int previousPlayer = Main.myPlayer;
+			Main.myPlayer = sender;
+			try {
+				foreach (IShimmerResult result in results)
+					result.OnShimmer(effectItem, iconicItem, effectStorage, net: false);
+			} finally {
+				Main.myPlayer = previousPlayer;
+			}
 
 			if (items.Count > 0) {
 				ModPacket packet = MagicStorageMod.Instance.GetPacket();
@@ -1536,7 +1836,30 @@ printReport:
 				Report(false, MessageType.CraftResult + " packet sent to all clients");
 			}
 
-			SendRefreshNetworkItems(storage.heart.Position, false);
+			SendRefreshNetworkItems(heart.Position, false);
+			SendItemShimmeringResult(sender, accessPosition, itemType, success: true);
+		}
+
+		private static void SendItemShimmeringResult(int client, Point16 accessPosition, int itemType, bool success) {
+			ModPacket packet = MagicStorageMod.Instance.GetPacket();
+			packet.Write((byte)MessageType.ShimmerItemInStorageResult);
+			packet.Write(accessPosition);
+			packet.Write(itemType);
+			packet.Write(success);
+			packet.Send(client);
+		}
+
+		private static void ClientReceiveItemShimmeringResult(BinaryReader reader) {
+			Point16 accessPosition = reader.ReadPoint16();
+			int itemType = reader.ReadInt32();
+			bool success = reader.ReadBoolean();
+
+			if (Main.netMode != NetmodeID.MultiplayerClient || StoragePlayer.LocalPlayer.GetDecraftingAccess()?.Position != accessPosition)
+				return;
+
+			DecraftingGUI.SetNextDefaultItemCollectionToRefresh(itemType);
+			MagicUI.IgnoreSpecificZoneRefreshing = !success;
+			MagicUI.RequestFullRefresh();
 		}
 
 		public static void SendStorageHeartName(TEStorageHeart heart) {
@@ -1545,7 +1868,7 @@ printReport:
 
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
 			packet.Write((byte)MessageType.RenameStorageHeart);
-			packet.Write(heart.Position);
+			packet.Write(StoragePlayer.LocalPlayer.ViewingStorage());
 			packet.Write(heart.storageName);
 			packet.Send();
 
@@ -1554,26 +1877,49 @@ printReport:
 
 		public static void ReceiveStorageHeartName(BinaryReader reader, int sender) {
 			Point16 position = reader.ReadPoint16();
-			string name = reader.ReadString();
-
-			if (!TileEntity.ByPosition.TryGetValue(position, out TileEntity entity) || entity is not TEStorageHeart heart)
+			if (!TryReadBoundedString(reader, InboundPacketGuard.MaxStorageNameLength, out string name))
 				return;
 
-			heart.storageName = name;
-
 			if (Main.netMode == NetmodeID.MultiplayerClient) {
+				if (position.ResolveToTileEntity() is TEStorageHeart clientHeart)
+					clientHeart.storageName = name;
 				Report(true, MessageType.RenameStorageHeart + " packet received by client " + Main.myPlayer);
 				return;
 			}
 
-			// Forward the rename to other clients
+			if (!InboundPacketGuard.TryGetStorageEntity(position, sender, out TEStorageComponent _, out TEStorageHeart heart, requireInteractionRange: true))
+				return;
+
+			heart.storageName = name;
+
+			// Broadcast the authoritative value, including back to the requester.
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
 			packet.Write((byte)MessageType.RenameStorageHeart);
-			packet.Write(position);
+			packet.Write(heart.Position);
 			packet.Write(name);
-			packet.Send(ignoreClient: sender);
+			packet.Send();
 
 			Report(true, MessageType.RenameStorageHeart + " packet sent from server from client " + sender);
+		}
+
+		internal static bool TryReadBoundedString(BinaryReader reader, int maxCharacters, out string value) {
+			value = null;
+			int byteCount;
+			try {
+				byteCount = reader.Read7BitEncodedInt();
+			} catch (Exception exception) when (exception is FormatException or EndOfStreamException) {
+				return false;
+			}
+
+			if (byteCount < 0 || byteCount > maxCharacters * 4)
+				return false;
+
+			byte[] bytes = reader.ReadBytes(byteCount);
+			if (bytes.Length != byteCount)
+				return false;
+
+			value = Encoding.UTF8.GetString(bytes);
+			return value.Length <= maxCharacters;
 		}
 
 		[Obsolete($"Use {nameof(RequestStorageDepositHistoryChunks)} instead", error: true)]
@@ -1632,7 +1978,12 @@ printReport:
 			Point16 position = reader.ReadPoint16();
 
 			if (Main.netMode == NetmodeID.Server) {
-				if (TileEntity.ByPosition.TryGetValue(position, out var te) && te is TEStorageUnit unit) {
+				Player player = Main.player[sender];
+				if (player.HeldItem.type == ModContent.ItemType<StorageExtractor>()
+				&& InboundPacketGuard.TryGetStorageEntity(position, sender, out TEStorageUnit unit, out TEStorageHeart heart, requireInteractionRange: true)
+				&& unit.IsTileValidForEntity(position.X, position.Y)
+				&& unit.GetCurrentTier() is StorageUnitTier tier
+				&& tier.Type != StorageUnitTier.Empty.Type) {
 					var types = unit.GetItems().Select(static i => i.type).Distinct().ToList();
 
 					Item spawnedItem = unit.RemoveItemsAndSpawnCore();
@@ -1642,10 +1993,8 @@ printReport:
 					// RemoveItemsAndSpawnCore() already sends the frame change
 				//	unit.UpdateTileFrameWithNetSend();
 
-					if (unit.GetHeart() is TEStorageHeart heart) {
-						heart.ResetCompactStage();
-						SendRefreshNetworkItems(heart.Position, typesToRefresh: types);
-					}
+					heart.ResetCompactStage();
+					SendRefreshNetworkItems(heart.Position, typesToRefresh: types);
 				}
 
 				Report(true, MessageType.ClientSendCoreRemoval + " packet received by server from client " + sender);
@@ -1657,7 +2006,7 @@ printReport:
 				ModPacket packet = MagicStorageMod.Instance.GetPacket();
 				packet.Write((byte)MessageType.ClientSendCoreInsertion);
 				packet.Write(position);
-				ItemIO.Send(core.Item, packet, false, false);
+				packet.Write((byte)Main.LocalPlayer.selectedItem);
 				packet.Send();
 
 				Report(true, MessageType.ClientSendCoreInsertion + " packet sent from client " + Main.myPlayer);
@@ -1666,18 +2015,41 @@ printReport:
 
 		public static void ReceiveCoreInsertion(BinaryReader reader, int sender) {
 			Point16 position = reader.ReadPoint16();
-			Item item = ItemIO.Receive(reader, false, false);
+			int slot = reader.ReadByte();
 
 			if (Main.netMode == NetmodeID.Server) {
-				if (TileEntity.ByPosition.TryGetValue(position, out var te) && te is TEStorageUnit unit) {
-					unit.InsertCore((BaseStorageCore)item.ModItem);
+				Player player = Main.player[sender];
+				if (InboundPacketGuard.IsValidInventorySlot(slot)
+				&& InboundPacketGuard.TryGetStorageEntity(position, sender, out TEStorageUnit unit, out TEStorageHeart heart, requireInteractionRange: true)
+				&& unit.IsTileValidForEntity(position.X, position.Y)
+				&& unit.GetCurrentTier()?.Type == StorageUnitTier.Empty.Type
+				&& player.inventory[slot]?.ModItem is BaseStorageCore core) {
+					List<Item> coreItems;
+					try {
+						coreItems = core.RetrieveItems().ToList();
+					} catch (Exception exception) {
+						MagicStorageMod.Instance.Logger.Warn($"Rejected invalid Storage Core from player {sender}", exception);
+						return;
+					}
+
+					if (coreItems.Count > core.Tier.Capacity)
+						return;
+
+					unit.InsertCore(core);
+					unit.GetFramingState(out StorageUnitFullness fullness, out bool active);
+					Components.StorageUnit.SetTypeAndStyle(position.X, position.Y, core.Tier, fullness, active);
+					unit.UpdateTileFrameWithNetSend();
+					AuditSystem.ReportStorageUnitCoreInsertion(sender, unit, core);
+
+					Item inventoryItem = player.inventory[slot];
+					inventoryItem.stack--;
+					if (inventoryItem.stack <= 0)
+						inventoryItem.TurnToAir();
 					// InsertCore already sends the frame change
 				//	unit.UpdateTileFrameWithNetSend();
 
-					if (unit.GetHeart() is TEStorageHeart heart) {
-						heart.ResetCompactStage();
-						SendRefreshNetworkItems(heart.Position, ignoreSpecificRefreshes: true);
-					}
+					heart.ResetCompactStage();
+					SendRefreshNetworkItems(heart.Position, ignoreSpecificRefreshes: true);
 				}
 
 				Report(true, MessageType.ClientSendCoreInsertion + " packet received by server from client " + sender);
@@ -1728,10 +2100,6 @@ printReport:
 				SecuritySystem.HandleNetworkAccessibilityOnCreation(result, creator, Main.LocalPlayer, networkID);
 
 				Report(false, $"  Result: {result}");
-
-				// Ensure that Administrators always know the password for the network
-				if (Main.LocalPlayer.GetModPlayer<OperatorPlayer>().IsAdministrator)
-					RequestPasswordForNetwork(networkID);
 
 				RequestSecurityNetworkList();
 			}
@@ -1817,14 +2185,15 @@ printReport:
 				packet.Write((byte)MessageType.SecurityNetworkJoin);
 				packet.Write((byte)result);
 				packet.Write(networkID);
-				packet.WriteStringSafely(password);
 				packet.Send(toClient: sender);
 
 				Report(true, MessageType.SecurityNetworkJoin + " packet sent to client " + sender);
 			} else {
 				NetworkActionResult result = (NetworkActionResult)reader.ReadByte();
 				int networkID = reader.ReadInt32();
-				string password = reader.ReadStringSafely();
+				string password = null;
+				if (result.IsSuccess() && SecuritySystem.GetNetwork(networkID).restricted)
+					Main.LocalPlayer.GetModPlayer<SecurityPlayer>().TryGetPassword(networkID, out password);
 
 				Report(true, MessageType.SecurityNetworkJoin + " packet received by client " + Main.myPlayer);
 
@@ -1899,6 +2268,9 @@ printReport:
 			if (Main.netMode != NetmodeID.MultiplayerClient)
 				return;
 
+			if (newPassword is not null)
+				Main.LocalPlayer.GetModPlayer<SecurityPlayer>().RememberPassword(networkID, newPassword);
+
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
 			packet.Write((byte)MessageType.SecurityNetworkModification);
 			packet.Write(networkID);
@@ -1934,8 +2306,10 @@ printReport:
 					bool outdatedAuthorization = passwordChanged || privacyChanged;
 					var network = SecuritySystem.GetNetwork(networkID);
 
-					foreach (var player in Main.ActivePlayers)
-						SecuritySystem.HandleNetworkAccessibilityOnModification(result, player, network, outdatedAuthorization, player.whoAmI == sender);
+					foreach (var player in Main.ActivePlayers) {
+						bool isOwner = player.GetModPlayer<SecurityPlayer>().UniqueID == network.creatorID;
+						SecuritySystem.HandleNetworkAccessibilityOnModification(result, player, network, outdatedAuthorization, isOwner);
+					}
 				}
 
 				// Inform all clients of the result
@@ -1943,7 +2317,10 @@ printReport:
 				packet.Write((byte)MessageType.SecurityNetworkModification);
 				packet.Write((byte)result);
 				packet.Write(networkID);
-				packet.Write(new BitsByte(passwordChanged, privacyChanged));
+				BitsByte responseFlags = new(passwordChanged, privacyChanged);
+				if (result.IsSuccess())
+					responseFlags[2] = SecuritySystem.GetNetwork(networkID).restricted;
+				packet.Write(responseFlags);
 				packet.Write((byte)sender);
 				packet.Send();
 
@@ -1959,15 +2336,16 @@ printReport:
 
 				// If the password or restricted status was changed, the client's authorization status is outdated
 				var network = SecuritySystem.GetNetwork(networkID);
-				SecuritySystem.HandleNetworkAccessibilityOnModification(result, Main.LocalPlayer, network, flags[0] || flags[1], requestingPlayer == Main.myPlayer);
+				if (result.IsSuccess() && flags[1])
+					network = new SecuritySystem.NetworkView(network.creator, network.creatorID, network.name, flags[2], network.id);
+				bool isOwner = Main.LocalPlayer.GetModPlayer<SecurityPlayer>().UniqueID == network.creatorID;
+				SecuritySystem.HandleNetworkAccessibilityOnModification(result, Main.LocalPlayer, network, flags[0] || flags[1], isOwner);
+				if (!result.IsSuccess() && requestingPlayer == Main.myPlayer && flags[0])
+					Main.LocalPlayer.GetModPlayer<SecurityPlayer>().ForgetPassword(networkID);
 
 				Report(true, MessageType.SecurityNetworkModification + " packet received by client " + Main.myPlayer);
 
 				Report(false, $"  Result: {result}");
-
-				// Ensure that Administrators always know the password for the network
-				if (flags[0] && Main.LocalPlayer.GetModPlayer<OperatorPlayer>().IsAdministrator)
-					RequestPasswordForNetwork(networkID);
 
 				RequestSecurityNetworkList();
 			}
@@ -2089,7 +2467,8 @@ printReport:
 			if (Main.netMode != NetmodeID.MultiplayerClient)
 				return;
 
-			if (!player.GetModPlayer<OperatorPlayer>().hasOp && !player.GetModPlayer<SecurityPlayer>().HasJoinedNetwork(networkID))
+			if (!SecuritySystem.CanPlayerAccessImmediately(player, heart.assignedNetwork)
+			|| !SecuritySystem.CanPlayerAccessImmediately(player, networkID))
 				return;
 
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
@@ -2167,11 +2546,9 @@ printReport:
 					if (networks.Length > 0) {
 						foreach (var network in networks) {
 							packet.Write(network.id);
-							packet.WriteStringSafely(network.password);
 
 							// Ensure that the server's player instance is able to access the network
 							securityPlayer.JoinNetwork(network.id);
-							securityPlayer.RememberPassword(network.id, network.password);
 						}
 					}
 				}
@@ -2192,35 +2569,12 @@ printReport:
 					for (int i = 0; i < count; i++) {
 						int id = reader.ReadInt32();
 						securityPlayer.JoinNetwork(id);
-
-						var password = reader.ReadStringSafely();
-						if (password is not null) {
-							securityPlayer.RememberPassword(id, password);
-
-							Report(false, "  ID: " + id + ", Password: " + password);
-						} else
-							Report(false, "  ID: " + id);
+						Report(false, "  ID: " + id);
 					}
 				}
 
 				Report(!result.IsSuccess(), MessageType.DefaultAccessibleNetworks + " packet received by client " + Main.myPlayer);
 			}
-		}
-
-		public static void RequestPasswordForNetwork(int networkID) {
-			if (Main.netMode != NetmodeID.MultiplayerClient)
-				return;
-
-			// Only Administrators can forcibly request the password
-			if (!Main.LocalPlayer.GetModPlayer<OperatorPlayer>().IsAdministrator)
-				return;
-
-			ModPacket packet = MagicStorageMod.Instance.GetPacket();
-			packet.Write((byte)MessageType.SecurityNetworkPassword);
-			packet.Write(networkID);
-			packet.Send();
-
-			Report(true, MessageType.SecurityNetworkPassword + " packet sent to the server");
 		}
 
 		public static void ReceiveNetworkPasswordRequest(BinaryReader reader, int sender) {
@@ -2229,44 +2583,10 @@ printReport:
 
 				Report(true, MessageType.SecurityNetworkPassword + " packet received by server from client " + sender);
 
-				NetworkActionResult result = SecuritySystem.TryGetPassword(networkID, out string password);
-
-				if (result.IsSuccess()) {
-					// Ensure that the server's player instance is able to access the network
-					SecurityPlayer securityPlayer = Main.player[sender].GetModPlayer<SecurityPlayer>();
-					securityPlayer.JoinNetwork(networkID);
-					securityPlayer.RememberPassword(networkID, password);
-				}
-
-				// Inform the client of the result
-				ModPacket packet = MagicStorageMod.Instance.GetPacket();
-				packet.Write((byte)MessageType.SecurityNetworkPassword);
-				packet.Write((byte)result);
-				packet.WriteStringSafely(password);
-				packet.Send(toClient: sender);
-
-				Report(true, MessageType.SecurityNetworkPassword + " packet sent to client " + sender);
-			} else if (Main.netMode == NetmodeID.MultiplayerClient) {
-				int networkID = reader.ReadInt32();
-				NetworkActionResult result = (NetworkActionResult)reader.ReadByte();
-				string password = reader.ReadStringSafely();
-
-				// Ensure that only Administrators can receive the password
-				if (!Main.LocalPlayer.GetModPlayer<OperatorPlayer>().IsAdministrator)
-					return;
-
-				Report(true, MessageType.SecurityNetworkPassword + " packet received by client " + Main.myPlayer);
-
-				Report(false, $"  Result: {result}");
-
-				if (result.IsSuccess()) {
-					SecurityPlayer securityPlayer = Main.LocalPlayer.GetModPlayer<SecurityPlayer>();
-
-					securityPlayer.JoinNetwork(networkID);
-					securityPlayer.RememberPassword(networkID, password);
-
-					Report(false, "  ID: " + networkID + ", Password: " + password);
-				}
+				if (!AuditSystem.IsAdministratorSender(sender) || !SecuritySystem.NetworkExists(networkID))
+					Report(true, $"Rejected password request for network {networkID} from player {sender}");
+				else
+					Report(true, $"Ignored deprecated password request for network {networkID} from administrator {sender}");
 			}
 		}
 
@@ -2383,10 +2703,10 @@ printReport:
 	internal enum MessageType : byte
 	{
 		SearchAndRefreshNetwork,
-		ClinetStorageOperation,
+		ClientStorageOperation,
 		ServerStorageResult,
 		RefreshNetworkItems,
-		ClientSendTEUpdate,
+		ClientStorageComponentOperation,
 		ClientSendDeactivate,
 		ClientStationOperation,
 		ServerStationOperationResult,
@@ -2394,7 +2714,7 @@ printReport:
 		CraftRequest,
 		CraftResult,
 		SectionRequest,
-		SyncStorageUnitToClinet,
+		SyncStorageUnitToClient,
 		SyncStorageUnit,
 		ForceCraftingGUIRefresh,
 		TransferItems,
@@ -2417,6 +2737,7 @@ printReport:
 		ClientUnlockStorageHeart,
 		DeleteSpecificItem,
 		RequestShimmerItemInStorage,
+		ShimmerItemInStorageResult,
 		RenameStorageHeart,
 		SyncDepositHistory,
 		ClientSendCoreRemoval,
@@ -2438,6 +2759,24 @@ printReport:
 		ServerResponseDepositHistoryChunks,
 		UpdateDepositHistory,
 		ClientRequestPlayerOperatorChange,
-		RequestSecurityPlayerSync
+		RequestSecurityPlayerSync,
+		CraftOutcome
+	}
+
+	internal enum StorageComponentOperation : byte {
+		RemoteAccessLink,
+		EnvironmentModuleToggle
+	}
+
+	internal enum CraftRejectionReason : byte {
+		None,
+		InvalidRequest,
+		RecipeMismatch,
+		AccessDenied,
+		QueueFull,
+		Unavailable,
+		StateChanged,
+		Cancelled,
+		InternalError
 	}
 }

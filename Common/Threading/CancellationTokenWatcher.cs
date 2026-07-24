@@ -35,7 +35,9 @@ namespace MagicStorage.Common.Threading {
 					goto case 2;
 				case 2:
 					if (--_remainingIterations <= 0) {
-						_thread.cancellationToken.ThrowIfCancellationRequested();
+						if (_thread.cancellationToken.IsCancellationRequested)
+							break;
+
 						_remainingIterations = _iterationsPerCheck;
 					}
 
@@ -61,11 +63,11 @@ namespace MagicStorage.Common.Threading {
 		/// <summary>
 		/// Converts <paramref name="this"/> enumeration to a parallel query which checks the cancellation token of <paramref name="thread"/> every <paramref name="iterationsPerCheck"/> iterations.
 		/// </summary>
-		public static ParallelQuery<T> ToCancellableQuery<T>(this IEnumerable<T> @this, RefreshThread thread, int iterationsPerCheck) => @this.WatchForCancellation(thread, iterationsPerCheck).AsParallel().WithCancellation(thread.cancellationToken);
+		public static ParallelQuery<T> ToCancellableQuery<T>(this IEnumerable<T> @this, RefreshThread thread, int iterationsPerCheck) => @this.WatchForCancellation(thread, iterationsPerCheck).AsParallel();
 
 		/// <summary>
 		/// Converts <paramref name="this"/> enumeration to an ordered parallel query which checks the cancellation token of <paramref name="thread"/> every <paramref name="iterationsPerCheck"/> iterations.
 		/// </summary>
-		public static ParallelQuery<T> ToCancellableOrderedQuery<T>(this IEnumerable<T> @this, RefreshThread thread, int iterationsPerCheck) => @this.WatchForCancellation(thread, iterationsPerCheck).AsParallel().AsOrdered().WithCancellation(thread.cancellationToken);
+		public static ParallelQuery<T> ToCancellableOrderedQuery<T>(this IEnumerable<T> @this, RefreshThread thread, int iterationsPerCheck) => @this.WatchForCancellation(thread, iterationsPerCheck).AsParallel().AsOrdered();
 	}
 }

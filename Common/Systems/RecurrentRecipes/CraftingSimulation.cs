@@ -1,14 +1,19 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using Terraria;
 
 namespace MagicStorage.Common.Systems.RecurrentRecipes {
 	public sealed class CraftingSimulation {
+		private const int MaxCraftableSearchParallelism = 8;
+
 		private CraftResult simulationResult = CraftResult.Default;
 
 		public IEnumerable<Recipe> UsedRecipes => simulationResult.usedRecipes.OrderBy(static r => r.recursionDepth).Select(static r => r.recipe).DistinctBy(static r => r, ReferenceEqualityComparer.Instance);
+		internal IReadOnlyList<RecursedRecipe> CraftOperations => simulationResult.usedRecipes;
 		public IReadOnlyList<RequiredMaterialInfo> RequiredMaterials => simulationResult.requiredMaterials;
 		public IReadOnlyList<ExcessItemInfo> ExcessResults => simulationResult.excessResults;
 		public IEnumerable<int> RequiredTiles => simulationResult.requiredTiles;
@@ -81,13 +86,24 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 			}
 
 			int mainResultItem = recipe.original.createItem.type;
-			if (TryPlanCrafts(recipe, craftingTarget, available.CloneForSimulation(), mainResultItem, out CraftResult exactResult, cancellationToken)) {
+			if (craftingTarget == Item.CommonMaxStack) {
+				int maxCraftable = FindMaxCraftableFromLow(recipe, craftingTarget, available, mainResultItem, out CraftResult maxResult, cancellationToken);
+				if (maxCraftable > 0)
+					simulationResult = maxResult;
+
+				AmountCrafted = maxCraftable;
+				return;
+			}
+
+			bool exactSucceeded = TryPlanCrafts(recipe, craftingTarget, available.CloneForSimulation(), mainResultItem, out CraftResult exactResult, cancellationToken);
+
+			if (exactSucceeded) {
 				simulationResult = exactResult;
 				AmountCrafted = craftingTarget;
 				return;
 			}
 
-			int craftable = FindMaxCraftable(recipe, craftingTarget, available, mainResultItem, out CraftResult bestResult, cancellationToken);
+			int craftable = FindMaxCraftableBelowKnownFailure(recipe, craftingTarget, available, mainResultItem, out CraftResult bestResult, cancellationToken);
 			if (craftable > 0)
 				simulationResult = bestResult;
 
@@ -172,24 +188,138 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 			return true;
 		}
 
-		private static int FindMaxCraftable(RecursiveRecipe recipe, int craftingTarget, AvailableRecipeObjects available, int mainResultItem, out CraftResult bestResult, CancellationToken cancellationToken) {
+		private static int FindMaxCraftableFromLow(RecursiveRecipe recipe, int craftingTarget, AvailableRecipeObjects available, int mainResultItem, out CraftResult bestResult, CancellationToken cancellationToken) {
 			bestResult = CraftResult.Default;
+			int maxParallelism = Math.Min(MaxCraftableSearchParallelism, Environment.ProcessorCount);
+			if (!TryPlanCrafts(recipe, 1, available.CloneForSimulation(), mainResultItem, out bestResult, cancellationToken))
+				return 0;
 
-			int low = 0;
-			int high = craftingTarget;
+			int low = 1;
+			int nextProbe = 128;
+			bool useLowAmountTier = true;
+			long searchStart = Stopwatch.GetTimestamp();
 
-			while (low < high) {
+			while (low < craftingTarget) {
 				cancellationToken.ThrowIfCancellationRequested();
 
-				int mid = low + (high - low + 1) / 2;
-				if (TryPlanCrafts(recipe, mid, available.CloneForSimulation(), mainResultItem, out CraftResult craftResult, cancellationToken)) {
-					low = mid;
-					bestResult = craftResult;
-				} else
-					high = mid - 1;
+				var probes = new List<int>(maxParallelism);
+				if (useLowAmountTier) {
+					for (int n = 1; n <= maxParallelism; n++)
+						probes.Add(n == 1 ? 2 : n * n);
+
+					useLowAmountTier = false;
+				} else {
+					while (probes.Count < maxParallelism && nextProbe <= craftingTarget) {
+						probes.Add(nextProbe);
+						if (nextProbe == craftingTarget)
+							break;
+
+						nextProbe = Math.Min(craftingTarget, nextProbe * 2);
+					}
+				}
+
+				var results = new CraftResult[probes.Count];
+				var succeeded = new bool[probes.Count];
+				var elapsedMilliseconds = new double[probes.Count];
+				RunParallelProbes(recipe, available, mainResultItem, probes, results, succeeded, cancellationToken, elapsedMilliseconds);
+
+				int firstFailure = Array.FindIndex(succeeded, static value => !value);
+				int lastSuccess = firstFailure < 0 ? probes.Count - 1 : firstFailure - 1;
+				if (lastSuccess >= 0) {
+					low = probes[lastSuccess];
+					bestResult = results[lastSuccess];
+				}
+
+				MagicStorageMod.Instance.Logger.Info($"Max craft tier recipe={recipe.original.RecipeIndex} probes=[{string.Join(", ", probes.Select((amount, index) => $"{amount}:{(succeeded[index] ? "ok" : "fail")}:{elapsedMilliseconds[index]:F1}ms"))}]");
+
+				if (firstFailure >= 0) {
+					int result = FindMaxCraftableBelowKnownFailure(recipe, probes[firstFailure], available, mainResultItem, low, bestResult, out bestResult, cancellationToken);
+					MagicStorageMod.Instance.Logger.Info($"Max craft search complete recipe={recipe.original.RecipeIndex} result={result} elapsed={Stopwatch.GetElapsedTime(searchStart).TotalMilliseconds:F1}ms workers={maxParallelism}");
+					return result;
+				}
+
+				if (low == craftingTarget) {
+					MagicStorageMod.Instance.Logger.Info($"Max craft search complete recipe={recipe.original.RecipeIndex} result={low} elapsed={Stopwatch.GetElapsedTime(searchStart).TotalMilliseconds:F1}ms workers={maxParallelism}");
+					return low;
+				}
 			}
 
 			return low;
+		}
+
+		private static int FindMaxCraftableBelowKnownFailure(RecursiveRecipe recipe, int craftingTarget, AvailableRecipeObjects available, int mainResultItem, out CraftResult bestResult, CancellationToken cancellationToken)
+			=> FindMaxCraftableBelowKnownFailure(recipe, craftingTarget, available, mainResultItem, 0, CraftResult.Default, out bestResult, cancellationToken);
+
+		private static int FindMaxCraftableBelowKnownFailure(RecursiveRecipe recipe, int craftingTarget, AvailableRecipeObjects available, int mainResultItem, int initialLow, CraftResult initialBestResult, out CraftResult bestResult, CancellationToken cancellationToken) {
+			bestResult = initialBestResult;
+
+			int low = initialLow;
+			int high = craftingTarget;  // Known unavailable from the caller's exact probe.
+			int maxParallelism = Math.Min(MaxCraftableSearchParallelism, Environment.ProcessorCount);
+			int round = 0;
+
+			while (low + 1 < high) {
+				cancellationToken.ThrowIfCancellationRequested();
+				round++;
+
+				int probeCount = Math.Min(maxParallelism, high - low - 1);
+				if (probeCount <= 1) {
+					int mid = low + (high - low) / 2;
+					if (TryPlanCrafts(recipe, mid, available.CloneForSimulation(), mainResultItem, out CraftResult craftResult, cancellationToken)) {
+						low = mid;
+						bestResult = craftResult;
+					} else
+						high = mid;
+
+					continue;
+				}
+
+				var probes = new int[probeCount];
+				var results = new CraftResult[probeCount];
+				var succeeded = new bool[probeCount];
+				var elapsedMilliseconds = new double[probeCount];
+				int span = high - low;
+
+				for (int i = 0; i < probeCount; i++)
+					probes[i] = low + (int)((long)(i + 1) * span / (probeCount + 1));
+
+				RunParallelProbes(recipe, available, mainResultItem, probes, results, succeeded, cancellationToken, elapsedMilliseconds);
+
+				cancellationToken.ThrowIfCancellationRequested();
+
+				int firstFailure = Array.FindIndex(succeeded, static value => !value);
+				int lastSuccess = firstFailure < 0 ? probeCount - 1 : firstFailure - 1;
+				if (lastSuccess >= 0) {
+					low = probes[lastSuccess];
+					bestResult = results[lastSuccess];
+				}
+
+				if (firstFailure >= 0)
+					high = probes[firstFailure];
+
+				MagicStorageMod.Instance.Logger.Info($"Max craft search recipe={recipe.original.RecipeIndex} round={round} range={low}..{high} probes=[{string.Join(", ", probes.Select((amount, index) => $"{amount}:{(succeeded[index] ? "ok" : "fail")}:{elapsedMilliseconds[index]:F1}ms"))}]");
+			}
+
+			return low;
+		}
+
+		private static void RunParallelProbes(RecursiveRecipe recipe, AvailableRecipeObjects available, int mainResultItem, IReadOnlyList<int> probes, CraftResult[] results, bool[] succeeded, CancellationToken cancellationToken, double[] elapsedMilliseconds = null) {
+			int maxParallelism = Math.Min(MaxCraftableSearchParallelism, Environment.ProcessorCount);
+			Parallel.For(0, probes.Count, new ParallelOptions { MaxDegreeOfParallelism = maxParallelism }, (index, state) => {
+					if (cancellationToken.IsCancellationRequested) {
+						state.Stop();
+						return;
+					}
+
+					try {
+						long probeStart = Stopwatch.GetTimestamp();
+						succeeded[index] = TryPlanCrafts(recipe, probes[index], available.CloneForSimulation(), mainResultItem, out results[index], cancellationToken);
+						if (elapsedMilliseconds is not null)
+							elapsedMilliseconds[index] = Stopwatch.GetElapsedTime(probeStart).TotalMilliseconds;
+					} catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) {
+						state.Stop();
+					}
+				});
 		}
 
 		private static bool TryPlanCrafts(RecursiveRecipe recipe, int amountToCraft, AvailableRecipeObjects available, int mainResultItem, out CraftResult craftResult, CancellationToken cancellationToken) {

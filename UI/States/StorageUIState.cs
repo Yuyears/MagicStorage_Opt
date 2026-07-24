@@ -277,23 +277,16 @@ namespace MagicStorage.UI.States {
 				}
 
 				if (Main.netMode == NetmodeID.MultiplayerClient && StoragePlayer.LocalPlayer.GetStorageHeart() is TEStorageHeart heart) {
-					// Force a full refresh if netcode packets have been sent or received
-					// This is to hopefully mitigate any phantom/fake items that clients receive, since they go away when reopening the UI anyway
-					if (heart.netcodeUpdate) {
-						heart.netDesync++;
-
-						if (heart.netDesync >= 40) {
-							string msg = "Detected possible desync between client and server, forcing a full refresh of the Storage UI";
-
+					if (heart.TryConsumeTimedOutOperation(out long operationId, out double elapsedMilliseconds, out bool shouldWarn)) {
+						if (shouldWarn) {
+							string msg = $"Storage operation {operationId} timed out after {elapsedMilliseconds:F0}ms; forcing a full refresh";
 							Main.NewText(msg, Color.Orange);
 							MagicStorageMod.Instance.Logger.Warn(msg);
-
-							heart.netcodeUpdate = false;
-							heart.netDesync = 0;
-
-							MagicUI.RequestFullRefresh();
-							MagicUI.IgnoreSpecificZoneRefreshing = true;
+							heart.MarkNetworkWarning();
 						}
+
+						MagicUI.RequestFullRefresh();
+						MagicUI.IgnoreSpecificZoneRefreshing = true;
 					}
 
 					if (!heart.hasDepositHistory && !heart.requestingDepositHistory)
@@ -795,22 +788,22 @@ namespace MagicStorage.UI.States {
 					heart.DestroyUnloadedGlobalItemData(out _);
 				});
 
-				InitSubInventoryDepositButton(ref depositFromPiggyBank, "StorageGUI.DepositPiggyBank", p => p.bank.item,
+				InitSubInventoryDepositButton(ref depositFromPiggyBank, "StorageGUI.DepositPiggyBank", PlayerBankInventory.PiggyBank, p => p.bank.item,
 					(p, inv) => {
 						for (int i = 0; i < inv.Length && i < p.bank.item.Length; i++)
 							p.bank.item[i] = inv[i];
 					});
-				InitSubInventoryDepositButton(ref depositFromSafe, "StorageGUI.DepositSafe", p => p.bank2.item,
+				InitSubInventoryDepositButton(ref depositFromSafe, "StorageGUI.DepositSafe", PlayerBankInventory.Safe, p => p.bank2.item,
 					(p, inv) => {
 						for (int i = 0; i < inv.Length && i < p.bank2.item.Length; i++)
 							p.bank2.item[i] = inv[i];
 					});
-				InitSubInventoryDepositButton(ref depositFromForge, "StorageGUI.DepositForge", p => p.bank3.item,
+				InitSubInventoryDepositButton(ref depositFromForge, "StorageGUI.DepositForge", PlayerBankInventory.DefendersForge, p => p.bank3.item,
 					(p, inv) => {
 						for (int i = 0; i < inv.Length && i < p.bank3.item.Length; i++)
 							p.bank3.item[i] = inv[i];
 					});
-				InitSubInventoryDepositButton(ref depositFromVault, "StorageGUI.DepositVault", p => p.bank4.item,
+				InitSubInventoryDepositButton(ref depositFromVault, "StorageGUI.DepositVault", PlayerBankInventory.VoidVault, p => p.bank4.item,
 					(p, inv) => {
 						for (int i = 0; i < inv.Length && i < p.bank4.item.Length; i++)
 							p.bank4.item[i] = inv[i];
@@ -1021,8 +1014,9 @@ namespace MagicStorage.UI.States {
 				});
 			}
 
-			private void InitSubInventoryDepositButton(ref UIStorageControlDepositPlayerInventoryButton button, string localizationKey, Func<Player, Item[]> getInventory, Action<Player, Item[]> netFunc) {
+			private void InitSubInventoryDepositButton(ref UIStorageControlDepositPlayerInventoryButton button, string localizationKey, PlayerBankInventory inventory, Func<Player, Item[]> getInventory, Action<Player, Item[]> netFunc) {
 				button = new(Language.GetText("Mods.MagicStorage." + localizationKey)) {
+					Inventory = inventory,
 					GetInventory = getInventory,
 					NetReceiveInventoryResult = netFunc
 				};

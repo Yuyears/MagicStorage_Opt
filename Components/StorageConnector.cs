@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using MagicStorage.Common.Systems;
+using System.Collections.Generic;
 using Microsoft.Xna.Framework;
 using Terraria;
 using Terraria.DataStructures;
@@ -105,16 +106,53 @@ namespace MagicStorage.Components
 			return tile.HasTile && (tile.TileType == Type || TileLoader.GetTile(tile.TileType) is StorageComponent);
 		}
 
+		public override bool CanExplode(int i, int j)
+		{
+			TEStorageComponent component = FindConnectedComponent(new Point16(i, j));
+			return component is null || SecuritySystem.CanDestroyTile(component);
+		}
+
 		public override void KillTile(int i, int j, ref bool fail, ref bool effectOnly, ref bool noItem)
 		{
 			if (fail || effectOnly)
 				return;
+
+			TEStorageComponent component = FindConnectedComponent(new Point16(i, j));
+			if (component is not null && !SecuritySystem.CanDestroyTile(component))
+			{
+				fail = true;
+				effectOnly = true;
+				noItem = true;
+				return;
+			}
+
 			StorageComponent.killTile = new Point16(i, j);
 			if (Main.netMode == NetmodeID.MultiplayerClient)
 				NetHelper.SendSearchAndRefresh(StorageComponent.killTile.X, StorageComponent.killTile.Y);
 			else
 				TEStorageComponent.SearchAndRefreshNetwork(StorageComponent.killTile);
 			StorageComponent.killTile = Point16.NegativeOne;
+		}
+
+		private static TEStorageComponent FindConnectedComponent(Point16 origin)
+		{
+			HashSet<Point16> explored = new() { origin };
+			Queue<Point16> toExplore = new(TEStorageComponent.AdjacentComponents(origin));
+
+			while (toExplore.Count > 0)
+			{
+				Point16 point = toExplore.Dequeue();
+				if (!explored.Add(point))
+					continue;
+
+				if (TileEntity.ByPosition.TryGetValue(point, out TileEntity entity) && entity is TEStorageComponent component)
+					return component;
+
+				foreach (Point16 adjacent in TEStorageComponent.AdjacentComponents(point))
+					toExplore.Enqueue(adjacent);
+			}
+
+			return null;
 		}
 	}
 }

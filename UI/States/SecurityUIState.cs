@@ -512,7 +512,7 @@ namespace MagicStorage.UI.States {
 			}
 
 			private void CheckNetworkUpdate(NetworkInfoPopup self) {
-				NetworkActionResult result = SecuritySystem.ModifyNetwork(_activeNetwork.View.id, self.NetworkName, self.Password, self.Restricted);
+				NetworkActionResult result = SecuritySystem.ModifyNetwork(_activeNetwork.View.id, self.NetworkName, self.UpdatedPassword, self.Restricted);
 
 				NetHelper.Report(true, $"Network update result: {result}");
 
@@ -522,7 +522,7 @@ namespace MagicStorage.UI.States {
 					password = null;
 
 				_pendingNetworkAction = NETWORK_ACTION_UPDATE;
-				_pendingNetworkActionData = new NetworkModificationData(self.Password != password, _activeNetwork.View.restricted != self.Restricted);
+				_pendingNetworkActionData = new NetworkModificationData(self.UpdatedPassword is not null, _activeNetwork.View.restricted != self.Restricted);
 			}
 
 			private void CheckNetworkUpdate_Result() {

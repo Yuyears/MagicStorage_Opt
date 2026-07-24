@@ -270,7 +270,7 @@ public class MagicUI : ModSystem
 		} else if (typeof(T) == typeof(int)) {
 			if (IsDecraftingUIOpen()) {
 				// Start a refresh thread that updates the stored items for the provided shimmering item
-				DecraftingGUI.CreateSelectedItemRefreshThread(Unsafe.As<T, int>(ref selectedObject), amountTarget, caller);
+				DecraftingGUI.CreateSelectedItemRefreshThread(Unsafe.As<T, int>(ref selectedObject), amountTarget, caller).Start();
 			}
 		} else {
 			// Unsupported type

@@ -21,8 +21,10 @@ namespace MagicStorage {
 
 				Shimmer(amount);
 
-				SetNextDefaultItemCollectionToRefresh(selectedItem);
-				MagicUI.RequestFullRefresh();
+				if (Main.netMode != NetmodeID.MultiplayerClient) {
+					SetNextDefaultItemCollectionToRefresh(selectedItem);
+					MagicUI.RequestFullRefresh();
+				}
 
 				var sound = Main.rand.Next(4) switch {
 					0 => SoundID.Shimmer1,

@@ -1,5 +1,4 @@
-﻿using MagicStorage.CrossMod;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
@@ -225,19 +224,6 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 			var requiredTiles = result.requiredTiles;
 			var requiredConditions = result.requiredConditions;
 
-			EnvironmentSandbox sandbox;
-			IEnumerable<EnvironmentModule> modules;
-			if (CraftingGUI.GetHeart() is { } heart) {
-				sandbox = new EnvironmentSandbox(Main.LocalPlayer, heart);
-				modules = heart.GetModules();
-			} else {
-				sandbox = default;
-				modules = [];
-			}
-
-			// NOTE: [ThreadStatic] only runs the field initializer on one thread
-			CraftingGUI.DroppedItems ??= new();
-
 			foreach (OrderedRecipeContext context in recipeStack) {
 				cancellationToken.ThrowIfCancellationRequested();
 
@@ -332,18 +318,9 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 
 				// Fake a craft
 				Item createItem = recipe.createItem.Clone();
-				createItem.Prefix(-1);
 
-				List<Item> droppedItems = new();
-
-				for (int i = 0; i < ingredientBatches; i++) {
-					droppedItems.AddRange(ExtraCraftItemsSystem.GetSimulatedItemDrops(recipe));
-
-					foreach (EnvironmentModule module in modules)
-						module.OnConsumeItemsForRecipe(sandbox, recipe, recipe.requiredItem);
-				}
-
-				// Add the result item and any dropped items to the excess list
+				// Planning is deterministic. Random drops and mod callbacks run only
+				// when the validated craft is committed.
 				createItem.stack *= ingredientBatches;
 
 				if (!excessIndicies.TryGetValue(createItem.type, out int itemIndex)) {
@@ -352,15 +329,7 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 				} else
 					excessResults[itemIndex].UpdateStack(createItem.stack);
 
-				foreach (Item item in droppedItems) {
-					if (!excessIndicies.TryGetValue(item.type, out itemIndex)) {
-						excessIndicies[item.type] = excessResults.Count;
-						excessResults.Add(new ExcessItemInfo(item.type, new SharedCounter(item.stack), item.prefix));
-					} else
-						excessResults[itemIndex].UpdateStack(item.stack);
-				}
-
-				recipes.Add(new RecursedRecipe(context.depth, recipe));
+				recipes.Add(new RecursedRecipe(context.depth, recipe, ingredientBatches));
 				requiredTiles.UnionWith(recipe.requiredTile);
 				requiredConditions.UnionWith(recipe.Conditions);
 			}

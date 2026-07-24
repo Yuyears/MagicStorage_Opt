@@ -843,7 +843,27 @@ Mods: {
 		Search: 搜索
 		SearchName: 以名称搜索
 		SearchMod: 以模组搜索
-		// SortWaiting: Loading ...
+		SortWaiting: 加载中……
+		RefreshThreadError:
+			'''
+			Magic Storage 刷新界面时发生错误。
+			请查看 tModLoader-Logs/client.log 获取详细信息。
+			'''
+
+		RefreshTasks: {
+			PopulatingCaches: 正在填充缓存
+			CountingItems: 正在统计物品
+			RefreshingRecipes: 正在刷新配方
+			RefreshingItems: 正在刷新物品
+			ProcessingRecipes: 正在处理配方
+			ProcessingShimmerableItems: 正在处理可微光转换物品
+			SortingRecipes: 正在排序配方
+			SortingShimmerableItems: 正在排序可微光转换物品
+			PopulatingStoredIngredients: 正在填充已存材料
+			AggregatingStoredIngredients: 正在合并已存材料
+			AggregatingResultItems: 正在合并产物
+			UpdatingCaches: 正在更新缓存
+		}
 
 		SearchTips: {
 			SearchName: 以名称搜索
@@ -1040,7 +1060,7 @@ Mods: {
 		}
 
 		CraftingGUI: {
-			// ShowAllIngredients: Show all possible ingredients
+			ShowAllIngredients: 显示所有可能的材料
 
 			RecursionErrors: {
 				// NoRecipe: "[c/ff0000:Simulation failed to find a valid recursion tree, defaulting to original recipe]"
@@ -1076,24 +1096,24 @@ Mods: {
 		}
 
 		DecraftingGUI: {
-			// StoredResults: Stored Result Items
-			// ShimmeringReports: Shimmering Results
-			// ItemHidden: Item "{0}" was blacklisted.
-			// ItemRevealed: Item "{0}" was whitelisted.
-			// ItemHiddenGlobal: Item "{0}" was global blacklisted.
-			// ItemRevealedGlobal: Item "{0}" was global whitelisted.
-			// ShimmerButton: Shimmer
-			// ShimmerButtonTooltip: Left click to Shimmer item
-			// ShimmerButtonTooltipOld: Left click to Shimmer item (ctrl to shimmer max)
-			// ShimmerAmount: Shimmering: {0}
+			StoredResults: 已存储的产物
+			ShimmeringReports: 微光转换结果
+			ItemHidden: 已将物品“{0}”加入黑名单。
+			ItemRevealed: 已将物品“{0}”移出黑名单。
+			ItemHiddenGlobal: 已将物品“{0}”加入全局黑名单。
+			ItemRevealedGlobal: 已将物品“{0}”移出全局黑名单。
+			ShimmerButton: 微光转换
+			ShimmerButtonTooltip: 左键点击以转换物品
+			ShimmerButtonTooltipOld: 左键点击以转换物品（按住 Ctrl 可转换最大数量）
+			ShimmerAmount: 转换数量：{0}
 
 			ShimmerReports: {
-				// DoesNotShimmer: No shimmer results found
-				// CoinLuck: +{0}% Luck (+{1:0.##} value)
+				DoesNotShimmer: 未找到微光转换结果
+				CoinLuck: +{0}% 幸运值（+{1:0.##} 价值）
 
 				NPCSpawn: {
-					// DirectTransform: "{0}"
-					// IndirectTransform: "{0} (style #{1})"
+					DirectTransform: "{0}"
+					IndirectTransform: "{0}（样式 #{1}）"
 				}
 			}
 		}
@@ -1152,7 +1172,7 @@ Mods: {
 			Filtering: 筛选
 			Crafting: 合成
 			Storage: 存储
-			// Shimmering: Shimmering
+			Shimmering: 微光转换
 			# StorageGUI page for the extra controls
 			Controls: 控件
 			# EnvironmentGUI page for the modules

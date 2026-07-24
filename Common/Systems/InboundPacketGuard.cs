@@ -17,11 +17,13 @@ namespace MagicStorage.Common.Systems {
 	internal static class InboundPacketGuard {
 		internal const int MaxItemEntries = 4096;
 		internal const int MaxBankEntries = 256;
+		internal const int MaxSerializedItemBytes = 1024 * 1024;
+		internal const int MaxStorageNameLength = 64;
 
 		internal static PacketDirection GetDirection(MessageType type) => type switch {
 			MessageType.SearchAndRefreshNetwork
-			or MessageType.ClinetStorageOperation
-			or MessageType.ClientSendTEUpdate
+			or MessageType.ClientStorageOperation
+			or MessageType.ClientStorageComponentOperation
 			or MessageType.ClientSendDeactivate
 			or MessageType.ClientStationOperation
 			or MessageType.ResetCompactStage
@@ -37,6 +39,7 @@ namespace MagicStorage.Common.Systems {
 			or MessageType.ClientRequestPlayerOperatorChange
 			or MessageType.RequestSecurityPlayerSync
 			or MessageType.ClientRequestPlayerBankDeposit
+			or MessageType.SecurityNetworkPassword
 			or MessageType.ComponentPlacement
 			or MessageType.ComponentDestruction
 			or MessageType.DeleteSpecificItem
@@ -49,7 +52,8 @@ namespace MagicStorage.Common.Systems {
 			or MessageType.RefreshNetworkItems
 			or MessageType.ServerStationOperationResult
 			or MessageType.CraftResult
-			or MessageType.SyncStorageUnitToClinet
+			or MessageType.CraftOutcome
+			or MessageType.SyncStorageUnitToClient
 			or MessageType.MassDuplicateSellResult
 			or MessageType.ServerQuickStackToStorageResult
 			or MessageType.GolemHelpTextUpdate
@@ -58,6 +62,7 @@ namespace MagicStorage.Common.Systems {
 			or MessageType.PlayerHasServerOp
 			or MessageType.SecurityPlayerSync
 			or MessageType.PlayerBankDepositResult
+			or MessageType.ShimmerItemInStorageResult
 			or MessageType.StorageHeartNetwork
 			or MessageType.ServerResponseDepositHistoryChunks
 			or MessageType.UpdateDepositHistory => PacketDirection.ServerToClient,
@@ -75,7 +80,6 @@ namespace MagicStorage.Common.Systems {
 			or MessageType.RequestSecurityNetworkList
 			or MessageType.StorageHeartNetworkAssignment
 			or MessageType.DefaultAccessibleNetworks
-			or MessageType.SecurityNetworkPassword
 			or MessageType.AuditSystemMessage
 			or MessageType.SyncPityDropsPlayer => PacketDirection.Bidirectional,
 
@@ -116,6 +120,8 @@ namespace MagicStorage.Common.Systems {
 		internal static bool IsValidSender(int sender, int maxPlayers, bool active) => IsValidTransportSender(sender, maxPlayers) && active;
 
 		internal static bool IsValidCount(int count, int maximum) => count >= 0 && count <= maximum;
+
+		internal static bool IsValidInventorySlot(int slot) => slot >= 0 && slot < 59;
 
 		internal static bool IsWithinTileRange(Point playerCenter, Point16 target, int rangeX, int rangeY)
 			=> playerCenter.X >= target.X - rangeX

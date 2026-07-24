@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Threading;
 using MagicStorage.Common.Players;
 using MagicStorage.UI.States;
 using Newtonsoft.Json;
@@ -15,6 +16,11 @@ using Terraria.ModLoader.Config;
 namespace MagicStorage {
 	public class MagicStorageConfig : ModConfig
 	{
+		internal const int InfiniteRecursionDepth = -1;
+		internal const int MinRecursionDepth = InfiniteRecursionDepth;
+		internal const int MaxRecursionDepth = 10;
+		private static readonly AsyncLocal<int?> recursionDepthOverride = new();
+
 		[Header($"$Mods.MagicStorage.Config.Headers.Storage")]
 		[DefaultValue(true)]
 		public bool quickStackDepositMode;
@@ -46,7 +52,7 @@ namespace MagicStorage {
 
 		[DefaultValue(0)]
 		[DrawTicks]
-		[Range(-1, 10)]
+		[Range(MinRecursionDepth, MaxRecursionDepth)]
 		public int recursionCraftingDepth;  // Renamed in v0.6.0.2 to force a value reset
 
 		[Header($"$Mods.MagicStorage.Config.Headers.StorageAndCrafting")]
@@ -143,13 +149,33 @@ namespace MagicStorage {
 		public static bool CanMoveUIPanels => Instance.canMovePanels;
 
 		[JsonIgnore]
-		public static int RecipeRecursionDepth => Instance.recursionCraftingDepth;
+		public static int RecipeRecursionDepth => recursionDepthOverride.Value ?? Instance.recursionCraftingDepth;
 		
 		[JsonIgnore]
 		public static bool IsRecursionEnabled => RecipeRecursionDepth != 0;
 
 		[JsonIgnore]
-		public static bool IsRecursionInfinite => RecipeRecursionDepth == -1;
+		public static bool IsRecursionInfinite => RecipeRecursionDepth == InfiniteRecursionDepth;
+
+		internal static bool IsValidRecursionDepth(int depth) => depth is >= MinRecursionDepth and <= MaxRecursionDepth;
+
+		internal static RecursionDepthOverride OverrideRecursionDepth(int depth) {
+			if (!IsValidRecursionDepth(depth))
+				throw new ArgumentOutOfRangeException(nameof(depth));
+
+			return new RecursionDepthOverride(depth);
+		}
+
+		internal readonly struct RecursionDepthOverride : IDisposable {
+			private readonly int? previous;
+
+			internal RecursionDepthOverride(int depth) {
+				previous = recursionDepthOverride.Value;
+				recursionDepthOverride.Value = depth;
+			}
+
+			public void Dispose() => recursionDepthOverride.Value = previous;
+		}
 
 		[JsonIgnore]
 		public static bool DisplayLastSeenAutomatonTip => Instance.automatonRemembers;

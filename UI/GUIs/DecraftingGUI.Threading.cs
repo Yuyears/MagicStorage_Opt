@@ -10,7 +10,7 @@ using Terraria;
 
 namespace MagicStorage {
 	partial class DecraftingGUI {
-		public class ShimmeringRefreshThread : RefreshThread, IStorageItemsPovider, IProcessedStorageItemsProvider, IMainZoneFilterControlsProvider<int>, IMainZoneObjectResultsProvider<int>, IIngredientControlsProvider, ICraftingObjectProvider<int>, IShimmerSnapshotsProvider, IShimmerItemReportsProvider, IRecipeItemsProvider {
+		public class ShimmeringRefreshThread : RefreshThread, IStorageItemsProvider, IProcessedStorageItemsProvider, IMainZoneFilterControlsProvider<int>, IMainZoneObjectResultsProvider<int>, IIngredientControlsProvider, ICraftingObjectProvider<int>, IShimmerSnapshotsProvider, IShimmerItemReportsProvider, IRecipeItemsProvider {
 			public override bool IsPartialThread => false;
 
 			public override bool HasCompleteData => CraftingGUI.hasCompleteData;
@@ -230,7 +230,7 @@ namespace MagicStorage {
 
 				ProcessedStorageItems.CopyFromStaticCollectionsAndFields();
 				IngredientControls.CollectObjects(this);
-				ShimmerItemReports.CopyFromStaticCollection();
+				ShimmerItemReports.CollectObjects(CraftingObject.selection.Value);
 			}
 
 			protected override void Execute() {

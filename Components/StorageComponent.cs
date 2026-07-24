@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using MagicStorage.Common.Systems;
+using System.Collections.Generic;
 using Microsoft.Xna.Framework;
 using Terraria;
 using Terraria.DataStructures;
@@ -94,6 +95,28 @@ namespace MagicStorage.Components
 			return count;
 		}
 
+		public override bool CanExplode(int i, int j)
+		{
+			AdjustToTopLeft(ref i, ref j);
+			return GetTileEntity() is null || SecuritySystem.CanDestroyTile(i, j);
+		}
+
+		public override void KillTile(int i, int j, ref bool fail, ref bool effectOnly, ref bool noItem)
+		{
+			if (fail || effectOnly)
+				return;
+
+			AdjustToTopLeft(ref i, ref j);
+			if (GetTileEntity() is not null && (!TileEntity.ByPosition.TryGetValue(new Point16(i, j), out TileEntity entity)
+					|| entity is not TEStorageComponent component
+					|| !SecuritySystem.CanDestroyTile(component)))
+			{
+				fail = true;
+				effectOnly = true;
+				noItem = true;
+			}
+		}
+
 		public override void KillMultiTile(int i, int j, int frameX, int frameY)
 		{
 			killTile = new Point16(i, j);
@@ -105,13 +128,16 @@ namespace MagicStorage.Components
 			if (Main.netMode == NetmodeID.MultiplayerClient)
 				NetHelper.SendSearchAndRefresh(killTile.X, killTile.Y);
 			else
-			{
-				if (Main.netMode == NetmodeID.MultiplayerClient)
-					NetHelper.SendSearchAndRefresh(killTile.X, killTile.Y);
-				else
-					TEStorageComponent.SearchAndRefreshNetwork(killTile);
-			}
+				TEStorageComponent.SearchAndRefreshNetwork(killTile);
 			killTile = Point16.NegativeOne;
+		}
+
+		private static void AdjustToTopLeft(ref int i, ref int j)
+		{
+			if (Main.tile[i, j].TileFrameX % 36 == 18)
+				i--;
+			if (Main.tile[i, j].TileFrameY % 36 == 18)
+				j--;
 		}
 
 		public override void MouseOver(int i, int j) {

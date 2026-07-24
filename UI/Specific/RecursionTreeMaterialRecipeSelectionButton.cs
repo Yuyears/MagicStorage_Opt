@@ -1,16 +1,16 @@
-﻿using Terraria.Audio;
+using Terraria.Audio;
 using Terraria.GameContent.UI.Elements;
 using Terraria.ID;
 using Terraria.UI;
 
 namespace MagicStorage.UI {
-	public class RecursionTreeMaterialRecipeSlectionButton : UITextPanel<char> {
+	public class RecursionTreeMaterialRecipeSelectionButton : UITextPanel<char> {
 		public readonly RecursionTreeMaterialEntry parent;
 		public readonly bool next;
 
 		// TODO: incomplete implementation
 
-		public RecursionTreeMaterialRecipeSlectionButton(RecursionTreeMaterialEntry parent, bool next, float scale = 1) : base(next ? '>' : '<', scale, false) {
+		public RecursionTreeMaterialRecipeSelectionButton(RecursionTreeMaterialEntry parent, bool next, float scale = 1) : base(next ? '>' : '<', scale, false) {
 			this.parent = parent;
 			this.next = next;
 		}
@@ -25,4 +25,8 @@ namespace MagicStorage.UI {
 			SoundEngine.PlaySound(SoundID.MenuTick);
 		}
 	}
+
+	[System.Obsolete("Use RecursionTreeMaterialRecipeSelectionButton instead")]
+	public class RecursionTreeMaterialRecipeSlectionButton(RecursionTreeMaterialEntry parent, bool next, float scale = 1)
+		: RecursionTreeMaterialRecipeSelectionButton(parent, next, scale) { }
 }

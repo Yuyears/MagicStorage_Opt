@@ -58,6 +58,8 @@ namespace MagicStorage.UI.Security {
 
 		public string Password => _inputNetworkPassword.State.InputText;
 
+		public string UpdatedPassword => Password == _originalPasswordText ? null : Password;
+
 		public NetworkInfoPopup() {
 			BackgroundColor = Utility.PanelColorWithoutTransparency;
 			SetPadding(pixels: 8);
@@ -178,18 +180,7 @@ namespace MagicStorage.UI.Security {
 			*/
 			_confirm.VAlign = 0.5f;
 
-			_delete.OnLeftClick += (evt, element) => {
-				// Restore the actual password
-				if (_inputNetworkPassword.State.IsActive)
-					_inputNetworkPassword.State.Set(_originalPasswordText);
-				else {
-					_inputNetworkPassword.State.Activate();
-					_inputNetworkPassword.State.Set(_originalPasswordText);
-					_inputNetworkPassword.State.Deactivate();
-				}
-
-				OnDelete?.Invoke(this);
-			};
+			_delete.OnLeftClick += (evt, element) => OnDelete?.Invoke(this);
 			/*
 			_delete.GetLayoutManager().Attributes = new LayoutAttributes()
 				.InheritSizeFrom(_delete)

@@ -1,4 +1,3 @@
-using MagicStorage.CrossMod;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -130,32 +129,11 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 		}
 
 		public void RecordRecipeCraft(Recipe recipe, int batches, int depth) {
-			usedRecipes.Add(new RecursedRecipe(depth, recipe));
+			usedRecipes.Add(new RecursedRecipe(depth, recipe, batches));
 			requiredTiles.UnionWith(recipe.requiredTile);
 			requiredConditions.UnionWith(recipe.Conditions);
 
-			EnvironmentSandbox sandbox;
-			IEnumerable<EnvironmentModule> modules;
-			if (CraftingGUI.GetHeart() is { } heart) {
-				sandbox = new EnvironmentSandbox(Main.LocalPlayer, heart);
-				modules = heart.GetModules();
-			} else {
-				sandbox = default;
-				modules = [];
-			}
-
-			CraftingGUI.DroppedItems ??= new();
-
-			for (int i = 0; i < batches; i++) {
-				foreach (Item item in ExtraCraftItemsSystem.GetSimulatedItemDrops(recipe))
-					ProduceItem(item.type, item.stack, item.prefix);
-
-				foreach (EnvironmentModule module in modules)
-					module.OnConsumeItemsForRecipe(sandbox, recipe, recipe.requiredItem);
-			}
-
 			Item createItem = recipe.createItem.Clone();
-			createItem.Prefix(-1);
 			ProduceItem(createItem.type, createItem.stack * batches, createItem.prefix);
 		}
 
@@ -169,7 +147,7 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 				.ToList();
 
 			return new CraftResult(
-				new List<RecursedRecipe>(usedRecipes.DistinctBy(static r => r, RecursedRecipeComparer.Instance)),
+				new List<RecursedRecipe>(usedRecipes),
 				materials,
 				excess,
 				new HashSet<int>(requiredTiles),

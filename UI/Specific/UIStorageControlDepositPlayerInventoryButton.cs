@@ -1,4 +1,5 @@
-﻿using MagicStorage.Components;
+﻿using MagicStorage.Common.Systems;
+using MagicStorage.Components;
 using System;
 using Terraria;
 using Terraria.Audio;
@@ -8,9 +9,17 @@ using Terraria.Localization;
 using Terraria.UI;
 
 namespace MagicStorage.UI {
+	public enum PlayerBankInventory : byte {
+		PiggyBank,
+		Safe,
+		DefendersForge,
+		VoidVault
+	}
+
 	public class UIStorageControlDepositPlayerInventoryButton : UITextPanel<LocalizedText> {
 		public Func<Player, Item[]> GetInventory;
 		public Action<Player, Item[]> NetReceiveInventoryResult;
+		public PlayerBankInventory Inventory;
 
 		internal static Action<Player, Item[]> PendingResultAction;
 
@@ -22,15 +31,21 @@ namespace MagicStorage.UI {
 			if (StoragePlayer.LocalPlayer.GetStorageHeart() is not TEStorageHeart heart)
 				return;
 
+			if (!StoragePlayer.IsCurrentLocalNetworkAccessible()) {
+				SecuritySystem.PrintStorageInaccessible();
+				return;
+			}
+
 			Item[] inv = GetInventory?.Invoke(Main.LocalPlayer);
 
 			if (inv is null)
 				return;  // Nothing to do
 
-			if (Main.netMode == NetmodeID.SinglePlayer)
+			if (Main.netMode == NetmodeID.SinglePlayer) {
+				using var access = SecuritySystem.CreateAccessContext();
 				TryDepositItems(inv, heart, true, out _);
-			else
-				NetHelper.ClientRequestDepositFromBank(inv, heart.Position, NetReceiveInventoryResult);
+			} else
+				NetHelper.ClientRequestDepositFromBank(StoragePlayer.LocalPlayer.ViewingStorage(), Inventory, NetReceiveInventoryResult);
 		}
 
 		internal static void TryDepositItems(Item[] inv, TEStorageHeart heart, bool playSound, out bool changed) {

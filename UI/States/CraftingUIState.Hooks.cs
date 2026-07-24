@@ -219,6 +219,7 @@ namespace MagicStorage.UI.States {
 			if (MagicUI.CurrentlyRefreshing)
 				return;  // Do not read anything until refreshing is completed
 
+			currentRecipeObjectsAvailable = true;
 			ClearObjectText();
 
 			if (!CraftingGUI.hasCompleteData) {
@@ -246,6 +247,7 @@ namespace MagicStorage.UI.States {
 					CraftingGUI.lastKnownRecursionErrorForObjects = MagicStorageConfig.IsRecursionEnabled
 						? Language.GetTextValue("Mods.MagicStorage.CraftingGUI.RecursionErrors.NoObjects")
 						: null;
+					currentRecipeObjectsAvailable = CraftingGUI.AreRecipeObjectsAvailable(CraftingGUI.selectedRecipe);
 				}
 
 				foreach (int tile in requiredTiles)

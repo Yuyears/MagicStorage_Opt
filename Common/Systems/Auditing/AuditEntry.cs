@@ -756,6 +756,7 @@ namespace MagicStorage.Common.Systems.Auditing {
 		}
 
 		private State _previous = new(), _current = new();
+		private bool _passwordChanged;
 
 		public bool PreviousPrivate => _previous.restricted;
 
@@ -770,8 +771,17 @@ namespace MagicStorage.Common.Systems.Auditing {
 		public SecurityNetworkModification() : base() { }
 
 		public SecurityNetworkModification(Player player, int networkID, string oldPassword, string newPassword, bool oldRestricted, bool newRestricted) : base(player, networkID) {
-			_previous.password = oldPassword;
-			_current.password = newPassword;
+			_passwordChanged = oldPassword != newPassword;
+			_previous.password = null;
+			_current.password = _passwordChanged ? "[REDACTED]" : null;
+			_previous.restricted = oldRestricted;
+			_current.restricted = newRestricted;
+		}
+
+		public SecurityNetworkModification(Player player, int networkID, bool passwordChanged, bool oldRestricted, bool newRestricted) : base(player, networkID) {
+			_passwordChanged = passwordChanged;
+			_previous.password = null;
+			_current.password = passwordChanged ? "[REDACTED]" : null;
 			_previous.restricted = oldRestricted;
 			_current.restricted = newRestricted;
 		}
@@ -791,8 +801,12 @@ namespace MagicStorage.Common.Systems.Auditing {
 			bool passwordChanged = false, hasPreviousPassword = false, hasCurrentPassword = false;
 			bb.Retrieve(ref _previous.restricted, ref _current.restricted, ref passwordChanged, ref hasPreviousPassword, ref hasCurrentPassword);
 
-			_previous.password = hasPreviousPassword ? ReadPassword(reader, legacyCharacterLengths) : null;
-			_current.password = !hasCurrentPassword ? null : passwordChanged ? ReadPassword(reader, legacyCharacterLengths) : _previous.password;
+			string previousPassword = hasPreviousPassword ? ReadPassword(reader, legacyCharacterLengths) : null;
+			string currentPassword = !hasCurrentPassword ? null : passwordChanged ? ReadPassword(reader, legacyCharacterLengths) : previousPassword;
+
+			_passwordChanged = passwordChanged || previousPassword != currentPassword;
+			_previous.password = null;
+			_current.password = _passwordChanged ? "[REDACTED]" : null;
 		}
 
 		public override void Serialize(BinaryWriter writer) {
@@ -800,7 +814,7 @@ namespace MagicStorage.Common.Systems.Auditing {
 
 			bool hasPreviousPassword = _previous.password is not null;
 			bool hasCurrentPassword = _current.password is not null;
-			bool passwordChanged = _previous.password != _current.password;
+			bool passwordChanged = _passwordChanged;
 			writer.Write(new BitsByte(_previous.restricted, _current.restricted, passwordChanged, hasPreviousPassword, hasCurrentPassword));
 
 			if (hasPreviousPassword)
@@ -838,9 +852,9 @@ namespace MagicStorage.Common.Systems.Auditing {
 			base.Stringify(source, builder);
 
 			bool privacyChanged = _previous.restricted != _current.restricted;
-			bool passwordChanged = _previous.password != _current.password;
+			bool passwordChanged = _passwordChanged;
 
-			static StringBuilder AddPasswordText(SecurityNetworkModification self, StringBuilder sb) => sb.Append($"password changed from \"{self._previous.password ?? "null"}\" to \"{self._current.password ?? "null"}\"");
+			static StringBuilder AddPasswordText(SecurityNetworkModification self, StringBuilder sb) => sb.Append("password was changed");
 
 			static StringBuilder AddPrivacyText(SecurityNetworkModification self, StringBuilder sb) => sb.Append($"privacy changed from {(self._previous.restricted ? "private" : "public")} to {(self._current.restricted ? "private" : "public")}");
 
@@ -862,7 +876,7 @@ namespace MagicStorage.Common.Systems.Auditing {
 		protected override void NetStringify(StringBuilder builder) {
 			base.NetStringify(builder);
 
-			builder.Append($", old (restricted={_previous.restricted}, password=\"{_previous.password ?? "null"}\") new (restricted={_current.restricted}, password=\"{_current.password ?? "null"}\")");
+			builder.Append($", old (restricted={_previous.restricted}) new (restricted={_current.restricted}), passwordChanged={_passwordChanged}");
 		}
 	}
 

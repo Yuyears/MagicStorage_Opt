@@ -24,30 +24,29 @@ namespace MagicStorage.Components
 
 		private class NetOperation
 		{
-			public NetOperation(Operation _type, Item _item, int _client)
-			{
-				type = _type;
-				item = _item;
-				client = _client;
-			}
-
-			public NetOperation(Operation _type, int _slot, int _client)
+			public NetOperation(Operation _type, int _slot, int _client, Item _item = null)
 			{
 				type = _type;
 				slot = _slot;
 				client = _client;
+				item = _item;
 			}
 
 			public Operation type { get; }
 			public int slot { get; }
-			public Item item { get; }
 			public int client { get; }
+			public Item item { get; }
 		}
 		ConcurrentQueue<NetOperation> clientOpQ = new ConcurrentQueue<NetOperation>();
 
 		public const int Rows = 3;
 		public const int Columns = 15;
 		public const int ItemsTotal = Rows * Columns;
+		internal static int DepositInventorySlot => PlayerItemSlotID.InventoryMouseItem;
+
+		internal static bool IsValidDepositSourceSlot(int slot) => slot == DepositInventorySlot;
+
+		internal static bool IsValidStationItem(Item item) => item is { IsAir: false };
 
 		//public Item[] stations = new Item[ItemsTotal];
 		public List<Item> stations = new List<Item>();
@@ -88,15 +87,20 @@ namespace MagicStorage.Components
 						}
 						else
 						{
-							int oldType = op.item.createTile;
-							Item item = DepositStation(op.item);
-							if (item.stack > 0)
-							{
-								ModPacket packet = PrepareServerResult(op.type);
-								ItemIO.Send(item, packet, true, true);
-								packet.Write((ushort)oldType);
-								packet.Send(op.client);
-							}
+							Player player = Main.player[op.client];
+							if (!IsValidDepositSourceSlot(op.slot) || player?.active != true || !IsValidStationItem(op.item))
+								continue;
+
+							Item item = op.item;
+							int oldType = item.type;
+							DepositStation(item);
+							player.inventory[op.slot] = item.Clone();
+							NetMessage.SendData(MessageID.SyncEquipment, op.client, -1, null, op.client, op.slot);
+
+							ModPacket packet = PrepareServerResult(op.type);
+							ItemIO.Send(item, packet, true, true);
+							packet.Write((ushort)oldType);
+							packet.Send(op.client);
 						}
 						NetHelper.SendTEUpdate(ID, Position);
 					}
@@ -120,13 +124,23 @@ namespace MagicStorage.Components
 
 			//	NetHelper.PrintClientRequest(client, "Item Withdraw", Position);
 			}
-			else
+			else if (op == Operation.Deposit)
 			{
-				Item item = ItemIO.Receive(reader, true, true);
-				netOp = new NetOperation(op, item, client);
+				byte slot = reader.ReadByte();
+				Player player = Main.player[client];
+				if (Main.netMode != NetmodeID.Server || !IsValidDepositSourceSlot(slot) || player?.active != true)
+					return;
+
+				Item item = player.inventory[slot];
+				if (!IsValidStationItem(item))
+					return;
+
+				netOp = new NetOperation(op, slot, client, item.Clone());
+				item.TurnToAir();
 
 			//	NetHelper.PrintClientRequest(client, "Item Deposit", Position);
-			}
+			} else
+				return;
 
 			if (netOp is not null && Main.netMode == NetmodeID.Server)
 				clientOpQ.Enqueue(netOp);
@@ -153,6 +167,10 @@ namespace MagicStorage.Components
 
 		private Item DepositStation(Item item)
 		{
+			NormalizeStations();
+			if (!IsValidStationItem(item))
+				return item;
+
 			if (stations.Count < ItemsTotal)
 			{
 				bool foundSame = false;
@@ -187,9 +205,15 @@ namespace MagicStorage.Components
 		{
 			if (Main.netMode == NetmodeID.MultiplayerClient)
 			{
+				int slot = DepositInventorySlot;
+				Main.LocalPlayer.inventory[slot] = item.Clone();
+				NetMessage.SendData(MessageID.SyncEquipment, number: Main.myPlayer, number2: slot);
+
 				ModPacket packet = PrepareClientRequest(Operation.Deposit);
-				ItemIO.Send(item, packet, true, true);
+				packet.Write((byte)slot);
 				packet.Send();
+
+				Main.LocalPlayer.inventory[slot].TurnToAir();
 				item.SetDefaults(0, true);
 			}
 			else
@@ -202,6 +226,7 @@ namespace MagicStorage.Components
 
 		private Item WithdrawStation(int slot)
 		{
+			NormalizeStations();
 			if (slot >= stations.Count)
 				return new Item();
 
@@ -213,6 +238,8 @@ namespace MagicStorage.Components
 
 			return item;
 		}
+
+		private void NormalizeStations() => stations.RemoveAll(static item => !IsValidStationItem(item));
 
 		internal static void UpdateRecipesFromStationAction(Item station) {
 			// Ensure that refreshing can't affect this method
@@ -334,6 +361,7 @@ namespace MagicStorage.Components
 		{
 			base.NetReceive(reader);
 			stations = NetCompression.ReceiveItems(reader, listCountBitSizeOverride: NetCompression.GetBitSize(Columns * Rows));
+			NormalizeStations();
 		}
 	}
 }

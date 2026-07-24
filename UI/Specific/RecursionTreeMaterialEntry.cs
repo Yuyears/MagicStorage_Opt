@@ -5,7 +5,7 @@ namespace MagicStorage.UI {
 	public class RecursionTreeMaterialEntry : UIPanel {
 		public MagicStorageItemSlot resultSlot;
 		public NewUISlotZone ingredientZone;
-		public RecursionTreeMaterialRecipeSlectionButton prev, next;
+		public RecursionTreeMaterialRecipeSelectionButton prev, next;
 
 		// TODO: incomplete implementation
 

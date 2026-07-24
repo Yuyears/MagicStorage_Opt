@@ -505,7 +505,7 @@ namespace MagicStorage {
 				if (requestedTarget == 1)
 					thread.RecipeSimulations.recipeToAvailableSimulation.AddOrUpdate(recipe, selectedSimulation);
 
-				amountCraftableForCurrentRecipe = maxCraftable = currentRecipeIsAvailable.Value ? requestedTarget : 0;
+				amountCraftableForCurrentRecipe = maxCraftable = selectedSimulation.AmountCrafted;
 			} else
 				amountCraftableForCurrentRecipe = maxCraftable = AmountCraftable(thread, recipe);
 
@@ -723,6 +723,14 @@ namespace MagicStorage {
 			recipeToAvailableLookup.AddOrUpdate(selectedRecipe, new Ref<bool>(available));
 
 			return available;
+		}
+
+		internal static bool TryGetPublishedCurrentRecipeAvailability(out bool available) {
+			available = currentRecipeIsAvailable ?? false;
+			return hasCompleteData
+				&& selectedRecipe is not null
+				&& object.ReferenceEquals(recentRecipeAvailable, selectedRecipe)
+				&& currentRecipeIsAvailable.HasValue;
 		}
 
 		[Obsolete("The blocked ingredients check is now part of the recipe availability checks.", error: true)]

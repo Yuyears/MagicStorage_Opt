@@ -48,9 +48,7 @@ namespace MagicStorage.UI {
 			NetHelper.Report(true, $"Clicked label \"{Text.Text}\" -- Valid? {module is not null}");
 
 			if (module is not null && EnvironmentGUI.currentAccess is not null) {
-				EnvironmentGUI.currentAccess.SetEnabled(module, IsOn);
-
-				NetHelper.ClientSendTEUpdate(EnvironmentGUI.currentAccess.Position);
+				NetHelper.SetEnvironmentModuleEnabled(EnvironmentGUI.currentAccess, module, IsOn);
 
 				string state = IsOn ? "[c/00ff00:enabled]" : "[c/ff0000:disabled]";
 				Main.NewText($"Module \"{Text.Text}\" was set to {state}.");

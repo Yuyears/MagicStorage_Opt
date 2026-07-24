@@ -51,7 +51,7 @@ namespace MagicStorage.Common.Commands {
 				}
 				catch (Exception ex) {
 					failures.Add($"{name}: {ex.GetType().Name}: {ex.Message}");
-					Mod.Logger.Error($"Serialization fixture '{name}' failed", ex);
+					MagicStorageMod.Instance.Logger.Error($"Serialization fixture '{name}' failed", ex);
 				}
 			}
 
@@ -388,9 +388,9 @@ namespace MagicStorage.Common.Commands {
 			AuditFile file = new();
 			AuditFile.DeserializeOne(new BinaryReader(stream), ref file);
 			if (file.Entries.SingleOrDefault() is not SecurityNetworkModification modification
-			|| modification.PreviousPassword != previousPassword
-			|| modification.CurrentPassword != currentPassword)
-				throw new InvalidOperationException("Legacy audit passwords were not migrated from character lengths.");
+			|| modification.PreviousPassword is not null
+			|| modification.CurrentPassword != "[REDACTED]")
+				throw new InvalidOperationException("Legacy audit passwords were not migrated to redacted values.");
 		}
 
 		private static void WriteEmptyAuditTables(BinaryWriter writer) {

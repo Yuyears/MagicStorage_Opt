@@ -582,7 +582,7 @@ namespace MagicStorage.UI.States {
 			}
 
 			if (MagicUI.HasActiveThread(out RefreshThread thread)) {
-				waitProgress.DisplayText = thread.CurrentTask;
+				waitProgress.DisplayText = GetLocalizedRefreshTask(thread.CurrentTask);
 				waitProgress.UpdateProgress(thread.Progress);
 			} else {
 				waitProgress.DisplayText = "";
@@ -623,6 +623,26 @@ namespace MagicStorage.UI.States {
 				player.cursorItemIconEnabled = false;
 				InterfaceHelper.HideItemIconCache();
 			}
+		}
+
+		private static string GetLocalizedRefreshTask(string task) {
+			string key = task switch {
+				"Populating Caches" => "PopulatingCaches",
+				"Counting Items" => "CountingItems",
+				"Refreshing recipes" => "RefreshingRecipes",
+				"Refreshing items" => "RefreshingItems",
+				"Processing Recipes" => "ProcessingRecipes",
+				"Processing Shimmerable Items" => "ProcessingShimmerableItems",
+				"Sorting Recipes" => "SortingRecipes",
+				"Sorting Shimmerable Items" => "SortingShimmerableItems",
+				"Populating Stored Ingredients" => "PopulatingStoredIngredients",
+				"Aggregating Stored Ingredients" => "AggregatingStoredIngredients",
+				"Aggregating Result Items" => "AggregatingResultItems",
+				"Updating Caches" => "UpdatingCaches",
+				_ => null
+			};
+
+			return key is null ? task ?? string.Empty : Language.GetTextValue("Mods.MagicStorage.RefreshTasks." + key);
 		}
 
 		public override void Draw(SpriteBatch spriteBatch) {

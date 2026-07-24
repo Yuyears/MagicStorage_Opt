@@ -13,6 +13,7 @@ namespace MagicStorage {
 	partial class CraftingGUI {
 		internal static readonly List<Item> items = new();
 		internal static readonly List<List<Item>> itemGroups = new();
+		internal static readonly List<Item> unfilteredItems = new();
 
 		internal static readonly Dictionary<int, int> itemCounts = new();
 		internal static readonly Dictionary<int, Dictionary<int, int>> itemCountsByPrefix = new();
@@ -60,7 +61,7 @@ namespace MagicStorage {
 
 		// Moved to internal method for use by DecraftingGUI
 		internal static void LoadItemsAndSetDictionaryInfo<T>(T thread)
-			where T : RefreshThread, IStorageItemsPovider, IProcessedStorageItemsProvider
+			where T : RefreshThread, IStorageItemsProvider, IProcessedStorageItemsProvider
 		{
 			LoadItemsAndSetDictionaryInfo(thread, thread.StorageItems);
 		}
@@ -69,6 +70,7 @@ namespace MagicStorage {
 			where T : RefreshThread, IProcessedStorageItemsProvider
 		{
 			var processed = thread.ProcessedStorageItems;
+			SetUnfilteredItems(processed, storage);
 
 			// Organize the items from the storage system
 			thread.workingItemList = storage.allStoredItems;
@@ -97,7 +99,7 @@ namespace MagicStorage {
 
 				processed.resultItems.AddRange(moduleItems);
 
-				processed.resultItemsFromModules.AddRange(thread.aggregateResults.GetAllSourceItems());
+				processed.resultItemsFromModules.AddRange(processed.allModuleItems);
 
 				numModuleItems = moduleItems.Count;
 			}
@@ -115,7 +117,17 @@ namespace MagicStorage {
 		internal static void LoadInventoryCountsOnly<T>(T thread, StorageItems storage)
 			where T : RefreshThread, IProcessedStorageItemsProvider
 		{
+			SetUnfilteredItems(thread.ProcessedStorageItems, storage);
 			SetCountsDictionaries(thread, storage.allStoredItems.Concat(thread.ProcessedStorageItems.allModuleItems ?? []));
+		}
+
+		private static void SetUnfilteredItems(ProcessedStorageItems processed, StorageItems storage)
+			=> CopyUnfilteredItems(processed.unfilteredItems.Value, storage.allStoredItems, processed.allModuleItems ?? []);
+
+		internal static void CopyUnfilteredItems(List<Item> destination, IEnumerable<Item> storageItems, IEnumerable<Item> moduleItems) {
+			destination.Clear();
+			destination.AddRange(storageItems);
+			destination.AddRange(moduleItems);
 		}
 
 		internal static void SetCountsDictionaries<T>(T thread)

@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Terraria;
 using Terraria.ID;
+using Terraria.Localization;
 
 namespace MagicStorage.Common.Threading.Refreshing {
 	/// <summary>
@@ -128,19 +129,20 @@ namespace MagicStorage.Common.Threading.Refreshing {
 		/// </summary>
 		public void SetDebugName(string name) => _debugName = name;
 
-		private static int _executionLock;
+		private static readonly SemaphoreSlim _executionGate = new(1, 1);
+		private int _ownsExecutionGate;
 		private const int UNLOCKED = 0;
 		private const int LOCKED = 1;
 
 		private int _finishLock = LOCKED;
 
 		private static void BlockUntilExecutionAllowed() {
-			while (Interlocked.CompareExchange(ref _executionLock, LOCKED, UNLOCKED) == LOCKED)
-				Thread.Yield();
+			_executionGate.Wait();
 		}
 
-		private static void AllowNewThreadToExecute() {
-			Interlocked.Exchange(ref _executionLock, UNLOCKED);
+		private void AllowNewThreadToExecute() {
+			if (Interlocked.Exchange(ref _ownsExecutionGate, UNLOCKED) == LOCKED)
+				_executionGate.Release();
 		}
 
 		private void BlockUntilFinished() {
@@ -178,35 +180,59 @@ namespace MagicStorage.Common.Threading.Refreshing {
 			_hasStarted = true;
 
 			if (IsPartialThread && !HasCompleteData) {
-				var name = DebugName;
+				try {
+					var name = DebugName;
+					var builder = FullRefreshBuilder
+						?? throw new InvalidOperationException($"Partial refresh thread \"{name}\" was requested with incomplete data, but this.{nameof(FullRefreshBuilder)} was null");
 
-				var builder = FullRefreshBuilder
-					?? throw new InvalidOperationException($"Partial refresh thread \"{name}\" was requested with incomplete data, but this.{nameof(FullRefreshBuilder)} was null");
+					NetHelper.Report(true, name + ": Partial UI state detected, falling back to full refresh thread...");
 
-				NetHelper.Report(true, name + ": Partial UI state detected, falling back to full refresh thread...");
-
-				var fullThread = builder.CreateThread(controls);
-				fullThread.SetDebugName(name + " (Full Refresh)");
-				fullThread.Start();
+					var fullThread = builder.CreateThread(controls);
+					fullThread.SetDebugName(name + " (Full Refresh)");
+					fullThread.Start();
+				} finally {
+					MarkAsFinished();
+				}
 				return;
 			}
 
 			BlockUntilExecutionAllowed();
+			_ownsExecutionGate = LOCKED;
+			bool taskStarted = false;
 
-			if (object.ReferenceEquals(this, MagicUI.activeRefreshingThread))
-				throw new InvalidOperationException($"Thread \"{DebugName}\" is already the active refreshing thread");
+			try {
+				if (object.ReferenceEquals(this, MagicUI.activeRefreshingThread))
+					throw new InvalidOperationException($"Thread \"{DebugName}\" is already the active refreshing thread");
 
-			if (!Start_LocateStorageHeart())
-				return;
+				if (!Start_LocateStorageHeart())
+					return;
 
-			NetHelper.Report(true, DebugName + ": Starting refreshing thread...");
+				StopActiveThreadAndWait();
 
-			if (refreshingUI.currentPage is BaseStorageUIAccessPage accessPage)
-				accessPage.RequestThreadWait(waiting: true);
+				NetHelper.Report(true, DebugName + ": Starting refreshing thread...");
 
-			CollectObjects();
+				CollectObjects();
 
-			new Task(Tick, TaskCreationOptions.LongRunning).Start();
+				new Task(Tick, TaskCreationOptions.LongRunning).Start();
+				taskStarted = true;
+			} finally {
+				if (!taskStarted)
+					AbortStart();
+			}
+		}
+
+		private void AbortStart() {
+			try {
+				ClearStaticCollections();
+			} finally {
+				Heart = null;
+
+				if (refreshingUI.currentPage is BaseStorageUIAccessPage accessPage)
+					accessPage.RequestThreadWait(waiting: false);
+
+				AllowNewThreadToExecute();
+				MarkAsFinished();
+			}
 		}
 
 		private bool Start_LocateStorageHeart() {
@@ -217,11 +243,6 @@ namespace MagicStorage.Common.Threading.Refreshing {
 
 			NetHelper.Report(true, DebugName + ": Start invoked with no heart or inaccessible network");
 
-			ClearStaticCollections();
-
-			if (refreshingUI.currentPage is BaseStorageUIAccessPage accessPage)
-				accessPage.RequestThreadWait(waiting: false);
-
 			if (!MagicUI.CurrentlyRefreshing) {
 				// Any active thread will refresh when it completes
 				// For the case when there isn't one, a refresh needs to be manually called
@@ -231,7 +252,6 @@ namespace MagicStorage.Common.Threading.Refreshing {
 					Main.QueueMainThreadAction(MagicUI.InvokeOnRefresh);
 			}
 
-			Heart = null;
 			return false;
 		}
 
@@ -311,8 +331,6 @@ namespace MagicStorage.Common.Threading.Refreshing {
 		public void CompleteOne() => Interlocked.Increment(ref _currentStep);
 
 		private void Initialize() {
-			StopActiveThreadAndWait();
-
 			// The prompt is closed if the old thread was cancelled, so make it appear again
 			if (refreshingUI.currentPage is BaseStorageUIAccessPage accessPage)
 				accessPage.RequestThreadWait(waiting: true);
@@ -350,6 +368,11 @@ namespace MagicStorage.Common.Threading.Refreshing {
 				Initialize();
 
 				Execute();
+				if (cancellationToken.IsCancellationRequested) {
+					NetHelper.Report(true, "Thread work was cancelled");
+					return;
+				}
+
 				HasSuccessfulCompletion = true;
 
 				NetHelper.Report(true, "Main work for thread finished");
@@ -360,7 +383,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 				MagicStorageMod.Instance.Logger.Error("An exception occurred during a refresh thread's execution:", ex);
 
 				if (Main.netMode != NetmodeID.Server)
-					Main.NewTextMultiline("An error occurred while refreshing a UI from Magic Storage.\nCheck your \"tModLoader-Logs/client.log\" file for more information.", c: Color.Red);
+					Main.NewTextMultiline(Language.GetTextValue("Mods.MagicStorage.RefreshThreadError"), c: Color.Red);
 			} finally {
 				try {
 					Cleanup();
@@ -381,8 +404,9 @@ namespace MagicStorage.Common.Threading.Refreshing {
 					MagicStorageMod.Instance.Logger.Error("An exception occurred during a refresh thread's cleanup:", ex);
 
 					if (!hasError && Main.netMode != NetmodeID.Server)
-						Main.NewTextMultiline("An error occurred while refreshing a UI from Magic Storage.\nCheck your \"tModLoader-Logs/client.log\" file for more information.", c: Color.Red);
+						Main.NewTextMultiline(Language.GetTextValue("Mods.MagicStorage.RefreshThreadError"), c: Color.Red);
 				} finally {
+					AllowNewThreadToExecute();
 					IsRunning = false;
 
 					if (refreshingUI.currentPage is BaseStorageUIAccessPage accessPage)
@@ -390,10 +414,6 @@ namespace MagicStorage.Common.Threading.Refreshing {
 
 					if (object.ReferenceEquals(this, MagicUI.activeRefreshingThread))
 						MagicUI.activeRefreshingThread = null;
-
-					// Always ensure that a new thread can be started if no thread is currently active
-					if (MagicUI.activeRefreshingThread is null)
-						AllowNewThreadToExecute();
 
 					if (!cancellationToken.IsCancellationRequested) {
 						// Ensure that race conditions with the UI can't occur

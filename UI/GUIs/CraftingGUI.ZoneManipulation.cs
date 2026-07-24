@@ -127,6 +127,22 @@ namespace MagicStorage {
 			return wrapper.Result;
 		}
 
+		internal static void ExecuteInCraftingEnvironment(Player player, in CraftingInformation information, Action action) {
+			ArgumentNullException.ThrowIfNull(player);
+			ArgumentNullException.ThrowIfNull(action);
+
+			int previousPlayer = Main.myPlayer;
+			CraftingInformation previousEnvironment = ReadCraftingEnvironmentFrom(player);
+			try {
+				Main.myPlayer = player.whoAmI;
+				WriteCraftingEnvironmentTo(information, player);
+				action();
+			} finally {
+				WriteCraftingEnvironmentTo(previousEnvironment, player);
+				Main.myPlayer = previousPlayer;
+			}
+		}
+
 		#region Nested types
 		private abstract class ActionWrapper {
 			public abstract void RunAction();

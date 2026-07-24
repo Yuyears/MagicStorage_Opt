@@ -22,6 +22,7 @@ namespace MagicStorage {
 						staticModuleItemWasFromInventoryTable: moduleItemWasFromInventory,
 						staticResultItemsList: items,
 						staticResultItemGroupsList: itemGroups,
+						staticUnfilteredItemsList: unfilteredItems,
 						staticResultItemsFromModulesList: sourceItemsFromModules,
 						staticCountsDictionary: itemCounts,
 						staticCountsByPrefixDictionary: itemCountsByPrefix,

@@ -79,7 +79,7 @@ namespace MagicStorage.Sorting
 
 		private static Dictionary<string, Dictionary<int, Dictionary<string, Dictionary<string, string>>>> _generateTaskNameCache = [];
 
-		private static string SortAndFilter_GenerateTaskName(string task, int attempt, string collectionObjects, string listClassification) {
+		internal static string SortAndFilter_GenerateTaskName(string task, int attempt, string collectionObjects, string listClassification) {
 			// Optimize repeated calls to this method by caching the result via the supplied parameters
 			listClassification ??= string.Empty;
 
@@ -90,7 +90,7 @@ namespace MagicStorage.Sorting
 				attemptCache[attempt] = collectionTypeCache = [];
 
 			if (!collectionTypeCache.TryGetValue(collectionObjects, out var classificationCache))
-				collectionTypeCache[listClassification] = classificationCache = [];
+				collectionTypeCache[collectionObjects] = classificationCache = [];
 
 			if (classificationCache.TryGetValue(listClassification, out string taskName))
 				return taskName;
@@ -107,6 +107,8 @@ namespace MagicStorage.Sorting
 
 			return classificationCache[listClassification] = taskNameBuilder.ToString();
 		}
+
+		internal static void ClearTaskNameCache() => _generateTaskNameCache.Clear();
 
 		public static IEnumerable<T> DoFiltering<T>(RefreshThread thread, IEnumerable<T> source, Func<T, Item> objToItem) {
 			return new ThreadFilterGenericEnumerator<T>(thread, source, objToItem);

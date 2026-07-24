@@ -44,10 +44,10 @@ namespace MagicStorage.Common.Systems.Auditing {
 			// NOTE: ModSystem.Unload seems to not run when exiting on a server, but OnWorldUnload does
 			Main.OnTickForThirdPartySoftwareOnly -= CheckForAudits;
 
-			while (_loading || _printing)
+			while (_loading || _writing || _printing)
 				Thread.Yield();
 
-			CheckForAudits();
+			CheckForAudits(checkSave: false);
 			
 			if (_file is not null && _lastKnownAuditPath is not null) {
 				// Ensure that the file is completely saved
@@ -58,7 +58,9 @@ namespace MagicStorage.Common.Systems.Auditing {
 			// NOTE: OnWorldUnload only runs once on servers, so resetting e.g. "_lastKnownAuditPath" isn't necessary
 		}
 
-		private static void CheckForAudits() {
+		private static void CheckForAudits() => CheckForAudits(checkSave: true);
+
+		private static void CheckForAudits(bool checkSave) {
 			if (Main.netMode != NetmodeID.Server || _loading || _writing || _printing || _clearing || _file is null)
 				return;
 
@@ -71,7 +73,8 @@ namespace MagicStorage.Common.Systems.Auditing {
 				NetHelper.Report(false, $"  {entry.NetRepresentation()}");
 			}
 
-			CheckSave();
+			if (checkSave)
+				CheckSave();
 		}
 
 		internal const byte COMMAND_TRANSLATE = byte.MaxValue;
@@ -100,6 +103,13 @@ namespace MagicStorage.Common.Systems.Auditing {
 			// Not actions, but rather commands
 			if (msg >= byte.MaxValue - NUM_COMMANDS + 1) {
 				ReportByteCommand(msg, sender);
+
+				if (Main.netMode == NetmodeID.Server
+				&& msg is COMMAND_CLEAR or COMMAND_TRANSLATE
+				&& !IsAdministratorSender(sender)) {
+					NetHelper.Report(true, $"Rejected audit administration command {msg} from unauthorized player {sender}");
+					return;
+				}
 
 				switch (msg) {
 					case COMMAND_FILE_CONTENT_END:
@@ -199,6 +209,12 @@ namespace MagicStorage.Common.Systems.Auditing {
 					throw new ArgumentOutOfRangeException(nameof(action));
 			}
 		}
+
+		internal static bool IsAdministratorSender(int sender)
+			=> sender >= 0
+			&& sender < Main.maxPlayers
+			&& Main.player[sender]?.active == true
+			&& Main.player[sender].GetModPlayer<OperatorPlayer>().IsAdministrator;
 
 		private static void Report(AuditEntry entry) {
 			if (Main.netMode != NetmodeID.Server || Main.ActiveWorldFileData is null)
@@ -628,11 +644,17 @@ namespace MagicStorage.Common.Systems.Auditing {
 		}
 
 		public static void ReportSecurityNetworkModification(Player player, int networkID, string oldPassword, bool oldRestricted, string newPassword, bool newRestricted) => Report(new SecurityNetworkModification(player, networkID, oldPassword, newPassword, oldRestricted, newRestricted));
+		public static void ReportSecurityNetworkModification(Player player, int networkID, bool passwordChanged, bool oldRestricted, bool newRestricted)
+			=> Report(new SecurityNetworkModification(player, networkID, passwordChanged, oldRestricted, newRestricted));
 		public static void ReportSecurityNetworkModification(int playerWhoAmI, int networkID, string oldPassword, bool oldRestricted, string newPassword, bool newRestricted) => ReportSecurityNetworkModification(Main.player[playerWhoAmI], networkID, oldPassword, oldRestricted, newPassword, newRestricted);
 
 		public static void NetReportSecurityNetworkModification(int playerWhoAmI, int networkID, string oldPassword, bool oldRestricted, string newPassword, bool newRestricted) {
 			if (Main.netMode != NetmodeID.MultiplayerClient)
 				return;
+
+			bool passwordChanged = oldPassword != newPassword;
+			oldPassword = null;
+			newPassword = passwordChanged ? "[REDACTED]" : null;
 
 			var packet = PreparePacket(AuditAction.SecurityNetworkModification, playerWhoAmI);
 			packet.Write(networkID);
@@ -940,7 +962,7 @@ namespace MagicStorage.Common.Systems.Auditing {
 			Main.NewText(GetLocalizedMessage("Messages.Client.RequestSent"), Color.Yellow);
 		}
 
-		private static void PrettifyAuditFile<T>(in T writer) where T : IWriteIntersceptor {
+		private static void PrettifyAuditFile<T>(in T writer) where T : IWriteInterceptor {
 			// Since CancellationTokenSource can only be cancelled once, the variable is reset after cancelling
 			// Copying the reference here allows for monitoring the object even after the variable has been reassigned
 			var localSource = _cancelSource;
@@ -994,7 +1016,7 @@ namespace MagicStorage.Common.Systems.Auditing {
 
 			try {
 				writer = new StreamWriter(_lastKnownAuditPath + ".txt", false, Encoding.UTF8);
-				PrettifyAuditFile(new StreamWriterIntersceptor(writer));
+				PrettifyAuditFile(new StreamWriterInterceptor(writer));
 			} finally {
 				writer?.Dispose();
 			}
@@ -1008,12 +1030,12 @@ namespace MagicStorage.Common.Systems.Auditing {
 			int requestID = reader.ReadInt32();
 
 			if (_file is not null)
-				new Task(LoadThenNetPrettifyAuditFile, new PacketIntersceptor(8192, newline, sender, requestID), _cancelSource.Token, TaskCreationOptions.LongRunning).Start();
+				new Task(LoadThenNetPrettifyAuditFile, new PacketInterceptor(8192, newline, sender, requestID), _cancelSource.Token, TaskCreationOptions.LongRunning).Start();
 		}
 
 		private static void LoadThenNetPrettifyAuditFile(object state) {
 			LoadAuditFile();
-			PrettifyAuditFile((PacketIntersceptor)state);
+			PrettifyAuditFile((PacketInterceptor)state);
 		}
 
 		private static List<char[]> _contentBuffers;

@@ -22,6 +22,7 @@ namespace MagicStorage {
 						staticModuleItemWasFromInventoryTable: CraftingGUI.moduleItemWasFromInventory,
 						staticResultItemsList: CraftingGUI.items,
 						staticResultItemGroupsList: CraftingGUI.itemGroups,
+						staticUnfilteredItemsList: CraftingGUI.unfilteredItems,
 						staticResultItemsFromModulesList: CraftingGUI.sourceItemsFromModules,
 						staticCountsDictionary: CraftingGUI.itemCounts,
 						staticCountsByPrefixDictionary: CraftingGUI.itemCountsByPrefix,

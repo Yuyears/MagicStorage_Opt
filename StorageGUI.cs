@@ -166,7 +166,7 @@ namespace MagicStorage
 		/// This parameter is only used if <see cref="Main.netMode"/> is <see cref="NetmodeID.MultiplayerClient"/>
 		/// </param>
 		/// <param name="keepOneIfFavorite">Whether at least one item should remain in the storage if it's favourited</param>
-		/// <returns>A valid item instance if the withdrawal was succesful, an air item otherwise.</returns>
+		/// <returns>A valid item instance if the withdrawal was successful, an air item otherwise.</returns>
 		public static Item DoWithdraw(Item item, bool toInventory = false, bool keepOneIfFavorite = false)
 		{
 			if (GetHeart() is not TEStorageHeart heart)

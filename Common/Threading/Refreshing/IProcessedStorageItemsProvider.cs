@@ -21,6 +21,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 		public readonly WeakTableProvider<Item, object> moduleItemWasFromInventory;
 		public readonly ListProvider<Item> resultItems;
 		public readonly ListOfListsProvider<Item> resultItemGroups;
+		public readonly ListProvider<Item> unfilteredItems;
 		public readonly ListProvider<Item> resultItemsFromModules;
 		public readonly DictionaryProvider<int, int> itemCounts;
 		public readonly DictionaryOfDictionariesProvider<int, int, int> itemCountsByPrefix;
@@ -31,6 +32,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 			ConditionalWeakTable<Item, object> staticModuleItemWasFromInventoryTable,
 			List<Item> staticResultItemsList,
 			List<List<Item>> staticResultItemGroupsList,
+			List<Item> staticUnfilteredItemsList,
 			List<Item> staticResultItemsFromModulesList,
 			Dictionary<int, int> staticCountsDictionary,
 			Dictionary<int, Dictionary<int, int>> staticCountsByPrefixDictionary,
@@ -40,6 +42,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 			moduleItemWasFromInventory = new(staticModuleItemWasFromInventoryTable);
 			resultItems = new(staticResultItemsList);
 			resultItemGroups = new(staticResultItemGroupsList);
+			unfilteredItems = new(staticUnfilteredItemsList);
 			resultItemsFromModules = new(staticResultItemsFromModulesList);
 			itemCounts = new(staticCountsDictionary);
 			itemCountsByPrefix = new(staticCountsByPrefixDictionary);
@@ -76,6 +79,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 			moduleItemWasFromInventory.CopyFromStatic();
 			resultItems.CopyFromStatic();
 			resultItemGroups.CopyFromStatic();
+			unfilteredItems.CopyFromStatic();
 			resultItemsFromModules.CopyFromStatic();
 			itemCounts.CopyFromStatic();
 			itemCountsByPrefix.CopyFromStatic();
@@ -93,6 +97,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 			moduleItemWasFromInventory.OverwriteStatic();
 			resultItems.OverwriteStatic();
 			resultItemGroups.OverwriteStatic();
+			unfilteredItems.OverwriteStatic();
 			resultItemsFromModules.OverwriteStatic();
 			itemCounts.OverwriteStatic();
 			itemCountsByPrefix.OverwriteStatic();
@@ -104,6 +109,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 			moduleItemWasFromInventory.ClearStatic();
 			resultItems.ClearStatic();
 			resultItemGroups.ClearStatic();
+			unfilteredItems.ClearStatic();
 			resultItemsFromModules.ClearStatic();
 			itemCounts.ClearStatic();
 			itemCountsByPrefix.ClearStatic();

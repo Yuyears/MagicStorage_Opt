@@ -9,6 +9,10 @@ namespace MagicStorage {
 		/// Adds the crafting stations, liquids, and biome effects provided by <paramref name="item"/> to <paramref name="information"/>.
 		/// </summary>
 		public static void AddCraftingZones(Item item, ref CraftingInformation information) {
+			AddCraftingZones(Main.LocalPlayer, item, ref information);
+		}
+
+		internal static void AddCraftingZones(Player player, Item item, ref CraftingInformation information) {
 			if (item.IsAir)
 				return;
 			
@@ -44,7 +48,6 @@ namespace MagicStorage {
 				}
 
 				// Briefly swap out the array with the information's array
-				Player player = Main.LocalPlayer;
 				bool[] oldAdjTile = player.adjTile;
 				player.adjTile = information.adjTiles;
 

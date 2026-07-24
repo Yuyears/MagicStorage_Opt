@@ -152,19 +152,20 @@ namespace MagicStorage {
 			if (probe.Kind == RecursiveAvailabilityProbeKind.DirectAvailable)
 				return RecipeListAvailabilityResult.Exact(true, GetConditionsToWatch(null, recipe));
 
+			InventoryCraftabilityGraph graph = thread.RecipeSimulations.inventoryCraftabilityGraph.Value;
 			if (probe.Kind == RecursiveAvailabilityProbeKind.GraphRejected)
-				return RecipeListAvailabilityResult.Exact(false, GetConditionsToWatch(null, recipe));
+				return RecipeListAvailabilityResult.Exact(false, GetConditionsToWatch(null, recipe, graph));
 
 			if (probe.GraphProbe.HasCandidate) {
 				var context = CreateCraftingSimulationContext(thread, 1);
 				var availableObjects = GetCurrentInventory(thread);
 				var simulation = new CraftingSimulation();
-				if (thread.RecipeSimulations.inventoryCraftabilityGraph.Value is { } graph
+				if (graph is not null
 				&& IsSameCraftingSnapshotIgnoringAmount(thread.RecipeSimulations.inventoryCraftabilityGraphContext.Value, context)
 				&& simulation.TryPlanCraftsWithGraph(recursiveRecipe, 1, availableObjects, graph, context, thread.cancellationToken))
 					return RecipeListAvailabilityResult.Exact(true, GetConditionsToWatch(simulation, recipe));
 
-				return RecipeListAvailabilityResult.Exact(false, GetConditionsToWatch(null, recipe));
+				return RecipeListAvailabilityResult.Exact(false, GetConditionsToWatch(null, recipe, graph));
 			}
 
 			return RecipeListAvailabilityResult.UnknownUnavailable;
@@ -191,14 +192,16 @@ namespace MagicStorage {
 			public static RecipeListAvailabilityResult Exact(bool isAvailable, Condition[] conditionsToWatch = null) => new(isAvailable, canCacheExact: true, shouldApplyToList: true, conditionsToWatch);
 		}
 
-		private static Condition[] GetConditionsToWatch(CraftingSimulation simulation, Recipe fallbackRecipe) {
-			if (simulation is not null) {
-				var conditions = simulation.RequiredConditions.ToArray();
-				if (conditions.Length > 0)
-					return conditions;
-			}
+		private static Condition[] GetConditionsToWatch(CraftingSimulation simulation, Recipe fallbackRecipe, InventoryCraftabilityGraph graph = null) {
+			HashSet<Condition> conditions = new(ReferenceEqualityComparer.Instance);
+			if (simulation is not null)
+				conditions.UnionWith(simulation.RequiredConditions);
 
-			return fallbackRecipe.Conditions.Count > 0 ? fallbackRecipe.Conditions.ToArray() : null;
+			conditions.UnionWith(fallbackRecipe.Conditions);
+			if (graph is not null)
+				conditions.UnionWith(graph.GetBlockedConditionsForRecipe(fallbackRecipe));
+
+			return conditions.Count > 0 ? [.. conditions] : null;
 		}
 
 		private readonly struct RecursiveAvailabilityProbeResult {
@@ -230,10 +233,28 @@ namespace MagicStorage {
 		private static bool IsAvailable_CheckNormalRecipe<T>(T thread, Recipe recipe)
 			where T : RefreshThread, IProcessedStorageItemsProvider, IMainZoneFilterControlsProvider, IIngredientControlsProvider, IRecipeSnapshotsProvider
 		{
+			if (!AreRecipeObjectsAvailable(thread, recipe))
+				return false;
+
+			bool creativeUnitPresent = thread?.IngredientControls.creativeUnitPresent.Value ?? allItemsAreInfinite;
+			HashSet<int> infiniteItems = thread?.IngredientControls.infiniteItems.Value ?? isItemInfinite;
+
+			if (creativeUnitPresent)
+				return true;
+
+			var itemCountsDictionary = GetItemCountsWithBlockedItemsRemoved(thread);
+
+			return CanReserveRecipeBatches(recipe, itemCountsDictionary, infiniteItems, 1);
+		}
+
+		internal static bool AreRecipeObjectsAvailable(Recipe recipe) => AreRecipeObjectsAvailable(NullThread, recipe);
+
+		private static bool AreRecipeObjectsAvailable<T>(T thread, Recipe recipe)
+			where T : RefreshThread, IMainZoneFilterControlsProvider, IRecipeSnapshotsProvider
+		{
 			if (recipe is null)
 				return false;
 
-			// CHANGE: v0.7.1 - Condition checks are moved first to better optimize RecipeWatchTarget
 			bool conditionsAvailable = thread?.RecipeSnapshots.ConditionsMet[recipe.RecipeIndex]
 				?? ExecuteInCraftingGuiEnvironment(recipe, RecipeLoader.RecipeAvailable);
 
@@ -244,26 +265,6 @@ namespace MagicStorage {
 
 			foreach (int requiredTile in recipe.requiredTile) {
 				if (!adjTiles[requiredTile])
-					return false;
-			}
-
-			bool creativeUnitPresent = thread?.IngredientControls.creativeUnitPresent.Value ?? allItemsAreInfinite;
-			HashSet<int> infiniteItems = thread?.IngredientControls.infiniteItems.Value ?? isItemInfinite;
-
-			if (creativeUnitPresent)
-				return true;
-
-			var itemCountsDictionary = GetItemCountsWithBlockedItemsRemoved(thread);
-
-			foreach (Item ingredient in recipe.requiredItem)
-			{
-				if (!TryGetIngredientQuantity(recipe, itemCountsDictionary, infiniteItems, ingredient.type, out int availableQuantity))
-				{
-					// Infinite item
-					continue;
-				}
-
-				if (availableQuantity < ingredient.stack)
 					return false;
 			}
 

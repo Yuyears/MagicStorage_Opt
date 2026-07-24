@@ -10,7 +10,7 @@ using Terraria.Localization;
 
 namespace MagicStorage {
 	partial class DecraftingGUI {
-		private class ItemWatchTarget : IRefreshUIWatchTarget {
+		private class ItemWatchTarget : IRefreshUIWatchTarget_2 {
 			private readonly int _itemType;
 
 			public ItemWatchTarget(int itemType) {
@@ -19,9 +19,9 @@ namespace MagicStorage {
 
 			public bool GetCurrentState() => IsAvailable(_itemType);
 
-			public void OnStateChange(out bool forceFullRefresh) {
+			public void OnStateChange(bool currentState) {
 				SetNextDefaultItemCollectionToRefresh(_itemType);
-				forceFullRefresh = false;
+				MagicUI.RequestMainZoneThread();
 			}
 		}
 

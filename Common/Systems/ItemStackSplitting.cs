@@ -23,7 +23,7 @@ namespace MagicStorage.Common.Systems {
 				return false;
 			}
 
-			Item result = withdrawFunc(target, int.Min(target.maxStack, Main.superFastStack + 1));
+			Item result = withdrawFunc(target, ClampSplitAmount(Main.mouseItem, int.Min(target.maxStack, Main.superFastStack + 1)));
 			if (result is null || result.IsAir) {
 				waitingForNextSplit = false;
 				return false;
@@ -48,5 +48,8 @@ namespace MagicStorage.Common.Systems {
 			waitingForNextSplit = false;
 			return true;
 		}
+
+		internal static int ClampSplitAmount(Item mouseItem, int requested)
+			=> mouseItem.IsAir ? requested : int.Min(requested, mouseItem.maxStack - mouseItem.stack);
 	}
 }

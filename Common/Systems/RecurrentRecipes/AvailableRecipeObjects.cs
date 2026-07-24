@@ -8,31 +8,34 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 		private readonly Dictionary<int, int> inventory;
 		private readonly Dictionary<int, int> inventoryOverlay;
 		private readonly bool[] recipeToConditionsAvailableCache;
+		private readonly System.Func<Recipe, bool> recipeAvailability;
 		public readonly HashSet<int> isItemInfinite;
 		public readonly bool creativeUnitPresent;
 
-		internal AvailableRecipeObjects(bool[] tiles, Dictionary<int, int> inventory, bool[] recipeToConditionsAvailableCache, HashSet<int> isItemInfinite, bool creativeUnitPresent) {
+		internal AvailableRecipeObjects(bool[] tiles, Dictionary<int, int> inventory, bool[] recipeToConditionsAvailableCache, HashSet<int> isItemInfinite, bool creativeUnitPresent, System.Func<Recipe, bool> recipeAvailability = null) {
 			this.tiles = tiles;
 			this.inventory = inventory;
 			this.recipeToConditionsAvailableCache = recipeToConditionsAvailableCache;
 			this.isItemInfinite = isItemInfinite;
 			this.creativeUnitPresent = creativeUnitPresent;
+			this.recipeAvailability = recipeAvailability;
 		}
 
-		private AvailableRecipeObjects(bool[] tiles, Dictionary<int, int> inventory, Dictionary<int, int> inventoryOverlay, bool[] recipeToConditionsAvailableCache, HashSet<int> isItemInfinite, bool creativeUnitPresent) {
+		private AvailableRecipeObjects(bool[] tiles, Dictionary<int, int> inventory, Dictionary<int, int> inventoryOverlay, bool[] recipeToConditionsAvailableCache, HashSet<int> isItemInfinite, bool creativeUnitPresent, System.Func<Recipe, bool> recipeAvailability) {
 			this.tiles = tiles;
 			this.inventory = inventory;
 			this.inventoryOverlay = inventoryOverlay;
 			this.recipeToConditionsAvailableCache = recipeToConditionsAvailableCache;
 			this.isItemInfinite = isItemInfinite;
 			this.creativeUnitPresent = creativeUnitPresent;
+			this.recipeAvailability = recipeAvailability;
 		}
 
 		/// <summary>
 		/// Creates a mutable overlay snapshot for recursive crafting plan probes.
 		/// </summary>
 		public AvailableRecipeObjects CloneForSimulation()
-			=> new AvailableRecipeObjects(tiles, inventory, new Dictionary<int, int>(), recipeToConditionsAvailableCache, isItemInfinite, creativeUnitPresent);
+			=> new AvailableRecipeObjects(tiles, inventory, new Dictionary<int, int>(), recipeToConditionsAvailableCache, isItemInfinite, creativeUnitPresent, recipeAvailability);
 
 		public bool IsItemInfinite(int item) => creativeUnitPresent || isItemInfinite.Contains(item);
 
@@ -41,6 +44,8 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 		public bool IsRecipeAvailable(Recipe recipe) {
 			if (recipeToConditionsAvailableCache is not null)
 				return recipeToConditionsAvailableCache[recipe.RecipeIndex];
+			if (recipeAvailability is not null)
+				return recipeAvailability(recipe);
 
 			// Cache is not present; use the Crafting Interface's context to check if the recipe is available
 			return CraftingGUI.ExecuteInCraftingGuiEnvironment(recipe, RecipeLoader.RecipeAvailable);
@@ -83,17 +88,23 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 
 			ClampedArithmetic stack = 0;
 			int quantity;
+			HashSet<int> acceptedTypes = [item];
 
 			bool usedRecipeGroup = false;
 			foreach (int groupID in recipe.acceptedGroups) {
 				RecipeGroup group = RecipeGroup.recipeGroups[groupID];
 				if (group.ContainsItem(item)) {
-					foreach (int groupItem in group.ValidItems) {
+					usedRecipeGroup = true;
+					foreach (int groupItem in group.ValidItems)
+						acceptedTypes.Add(groupItem);
+				}
+			}
+
+			if (usedRecipeGroup) {
+				foreach (int groupItem in acceptedTypes) {
 						if (TryGetIngredientQuantity(groupItem, out quantity)) {
 							stack += quantity;
-							usedRecipeGroup = true;
 						}
-					}
 				}
 			}
 

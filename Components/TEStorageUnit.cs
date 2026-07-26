@@ -720,14 +720,14 @@ namespace MagicStorage.Components
 					byte netOp = bitReader.ReadByte(numBits: 3);
 					if (Enum.IsDefined(typeof(NetOperations), netOp))
 					{
-						switch ((NetOperations)netOp)
-						{
-							// FIX: v0.7.1 - Item data should use the original tag information, not the netcode data
-							case NetOperations.FullySync:
-								fullSyncRequired = false;
+							switch ((NetOperations)netOp)
+							{
+								// FIX: v0.7.1 - Item data should use the original tag information, not the netcode data
+								case NetOperations.FullySync:
+									fullSyncRequired = false;
 								repairMetaData = false;
 								ClearItemsData();
-								List<Item> netItems = SaveCompression.LoadItems(bitReader, true, true, listCountBitSizeOverride: capacityBits);
+								List<Item> netItems = SaveCompression.LoadItems(bitReader, true, true, listCountBitSizeOverride: capacityBits, diagnosticContext: $"storageUnit={Position}");
 								for (int j = 0; j < netItems.Count; j++)
 								{
 									Item item = netItems[j];

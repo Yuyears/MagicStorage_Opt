@@ -3,11 +3,15 @@ using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using SerousCommonLib.UI;
 using System;
+using System.Diagnostics;
 using Terraria.Localization;
 using Terraria.UI;
 
 namespace MagicStorage.UI.Input {
 	public class NewUISearchBar : TextInputBar {
+		private static readonly long RefreshDelayTicks = Stopwatch.Frequency * 180 / 1000;
+		private long _refreshAt;
+
 		public Func<string> GetHoverText { get; set; }
 
 		internal bool BlockRefreshThreads { get; set; }
@@ -28,12 +32,16 @@ namespace MagicStorage.UI.Input {
 
 		public override void OnInputChanged() {
 			if (MagicStorageConfig.SearchBarRefreshOnKey && !BlockRefreshThreads)
-				MagicUI.StartMainZoneRefreshThread(caller: "NewUISearchBar.OnInputChanged()", forceMainZoneRebuild: true);
+				_refreshAt = Stopwatch.GetTimestamp() + RefreshDelayTicks;
+			else
+				_refreshAt = 0;
 
 			base.OnInputChanged();
 		}
 
 		public override void OnInputCleared() {
+			_refreshAt = 0;
+
 			if (!BlockRefreshThreads)
 				MagicUI.StartMainZoneRefreshThread(caller: "NewUISearchBar.OnInputCleared()", forceMainZoneRebuild: true);
 
@@ -41,6 +49,8 @@ namespace MagicStorage.UI.Input {
 		}
 
 		public override void OnInputFocusLost() {
+			_refreshAt = 0;
+
 			if (!BlockRefreshThreads)
 				MagicUI.StartMainZoneRefreshThread(caller: "NewUISearchBar.OnInputFocusLost()", forceMainZoneRebuild: true);
 
@@ -53,6 +63,12 @@ namespace MagicStorage.UI.Input {
 		}
 
 		protected override void RestrictedUpdate(GameTime gameTime) {
+			if (_refreshAt != 0 && Stopwatch.GetTimestamp() >= _refreshAt) {
+				_refreshAt = 0;
+				if (MagicStorageConfig.SearchBarRefreshOnKey && !BlockRefreshThreads)
+					MagicUI.StartMainZoneRefreshThread(caller: "NewUISearchBar.RestrictedUpdate()", forceMainZoneRebuild: true);
+			}
+
 			if (State.IsActive) {
 				// Update the hover text if any is present
 				if (IsMouseHovering && GetHoverText?.Invoke() is string hoverText) {

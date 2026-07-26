@@ -668,44 +668,22 @@ namespace MagicStorage
 			SendTEUpdate(access.ID, access.Position);
 		}
 
-		private static ModPacket PrepareStationOperation(Point16 position, byte op)
-		{
-			ModPacket packet = MagicStorageMod.Instance.GetPacket();
-			packet.Write((byte)MessageType.ClientStationOperation);
-			packet.Write(position.X);
-			packet.Write(position.Y);
-			packet.Write(op);
-			return packet;
-		}
-
-		private static ModPacket PrepareStationResult(byte op)
-		{
-			ModPacket packet = MagicStorageMod.Instance.GetPacket();
-			packet.Write((byte)MessageType.ServerStationOperationResult);
-			packet.Write(op);
-			return packet;
-		}
-
 		public static void SendDepositStation(Point16 position, Item item)
 		{
-			if (Main.netMode == NetmodeID.MultiplayerClient)
-			{
-				ModPacket packet = PrepareStationOperation(position, 0);
-				packet.Write((byte)Main.LocalPlayer.selectedItem);
-				packet.Send();
-
+			if (Main.netMode == NetmodeID.MultiplayerClient
+			&& TileEntity.ByPosition.TryGetValue(position, out TileEntity entity)
+			&& entity is TECraftingAccess access) {
+				access.TryDepositStation(item);
 				Report(true, "SendDepositStation packet sent from client " + Main.myPlayer);
 			}
 		}
 
 		public static void SendWithdrawStation(Point16 position, int slot)
 		{
-			if (Main.netMode == NetmodeID.MultiplayerClient)
-			{
-				ModPacket packet = PrepareStationOperation(position, 1);
-				packet.Write((byte)slot);
-				packet.Send();
-
+			if (Main.netMode == NetmodeID.MultiplayerClient
+			&& TileEntity.ByPosition.TryGetValue(position, out TileEntity entity)
+			&& entity is TECraftingAccess access) {
+				access.TryWithdrawStation(slot);
 				Report(true, "SendWithdrawStation packet sent from client " + Main.myPlayer);
 			}
 		}
@@ -714,13 +692,18 @@ namespace MagicStorage
 		{
 			Point16 position = new(reader.ReadInt16(), reader.ReadInt16());
 			TECraftingAccess.Operation op = (TECraftingAccess.Operation)reader.ReadByte();
+			long operationId = reader.ReadInt64();
+			int slot = reader.ReadByte();
 
 			if (!Enum.IsDefined(op)
 			|| !InboundPacketGuard.TryGetStorageEntity(position, sender, out TECraftingAccess craftingAccess, out _, requireInteractionRange: true)
-			|| !craftingAccess.IsTileValidForEntity(position.X, position.Y))
+			|| !craftingAccess.IsTileValidForEntity(position.X, position.Y)) {
+				if (Enum.IsDefined(op))
+					TECraftingAccess.SendServerResult(position, op, operationId, sender, accepted: false, new Item());
 				return;
+			}
 
-			craftingAccess.QClientOperation(reader, op, sender);
+			craftingAccess.QClientOperation(op, operationId, slot, sender);
 
 			Report(true, MessageType.ClientStationOperation + " packet received by server from client " + sender);
 			Report(false, "Operation: " + op);
@@ -729,28 +712,35 @@ namespace MagicStorage
 		public static void ReceiveServerStationResult(BinaryReader reader)
 		{
 			TECraftingAccess.Operation op = (TECraftingAccess.Operation)reader.ReadByte();
+			long operationId = reader.ReadInt64();
+			bool accepted = reader.ReadBoolean();
+			Point16 position = reader.ReadPoint16();
 			Item item = ItemIO.Receive(reader, true, true);
 
 			if (op == TECraftingAccess.Operation.Withdraw || op == TECraftingAccess.Operation.WithdrawToInventory)
 			{
 				var heart = StoragePlayer.LocalPlayer.GetStorageHeart();
 
-				if (Main.netMode == NetmodeID.MultiplayerClient)
+				if (accepted && Main.netMode == NetmodeID.MultiplayerClient)
 				{
 					StoragePlayer.GetItem(new EntitySource_TileEntity(heart), item, op == TECraftingAccess.Operation.Withdraw);
 					
 					TECraftingAccess.UpdateRecipesFromStationAction(item);
 				}
 			}
-			else // deposit operation
+			else if (op == TECraftingAccess.Operation.Deposit)
+			{
+				if (Main.netMode == NetmodeID.MultiplayerClient)
+					TECraftingAccess.ReceiveDepositPreparation(position, operationId, accepted);
+			}
+			else if (op == TECraftingAccess.Operation.DepositCommit)
 			{
 				int oldType = reader.ReadUInt16();
 
 				if (Main.netMode == NetmodeID.MultiplayerClient)
 				{
-					Main.LocalPlayer.inventory[TECraftingAccess.DepositInventorySlot] = item.Clone();
-					Main.mouseItem = item;
-					if (oldType > ItemID.None)
+					TECraftingAccess.ReceiveDepositCommit(position, operationId, accepted, item);
+					if (accepted && oldType > ItemID.None)
 						TECraftingAccess.UpdateRecipesFromStationAction(new Item(oldType));
 				}
 			}

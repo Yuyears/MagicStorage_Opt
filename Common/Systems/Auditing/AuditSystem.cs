@@ -20,7 +20,7 @@ using Terraria.ModLoader;
 namespace MagicStorage.Common.Systems.Auditing {
 	internal class AuditSystem : ModSystem {
 		private static DateTime _lastSaveTime;
-		public static TimeSpan SaveInterval { get; set; } = TimeSpan.FromMinutes(5);
+		public static TimeSpan SaveInterval { get; set; } = TimeSpan.FromMinutes(15);
 
 		private static bool _loading, _writing, _printing, _clearing;
 		private static CancellationTokenSource _cancelSource = new();

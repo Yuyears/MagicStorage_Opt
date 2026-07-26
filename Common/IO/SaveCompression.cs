@@ -57,9 +57,6 @@ namespace MagicStorage.Common.IO {
 					if (modItem is UnloadedItem unloadedItem) {
 						contentLookup.WriteModNameIndex(writer, unloadedItem.ModName);
 						contentLookup.WriteContentNameIndex(writer, unloadedItem.ItemName);
-					} else if (modItem is BaseErrorDummyItem errorItem) {
-						contentLookup.WriteModNameIndex(writer, errorItem.OriginalMod);
-						contentLookup.WriteContentNameIndex(writer, errorItem.OriginalName);
 					} else
 						contentLookup.WriteNameIndices(writer, modItem);
 				} else {
@@ -71,10 +68,8 @@ namespace MagicStorage.Common.IO {
 
 				// Write the prefix for the item
 				int prefix = item.prefix;
-				if (item.ModItem is BaseErrorDummyItem errorItemForPrefix)
-					prefix = errorItemForPrefix.OriginalPrefix;
 
-				if (PrefixLoader.GetPrefix(item.prefix) is ModPrefix modPrefix) {
+				if (PrefixLoader.GetPrefix(prefix) is ModPrefix modPrefix) {
 					writer.Write(true);
 
 					string prefixMod, prefixName;
@@ -93,9 +88,9 @@ namespace MagicStorage.Common.IO {
 				} else {
 					writer.Write(false);
 
-					if (item.prefix != 0 && item.prefix < PrefixID.Count) {
+					if (prefix != 0 && prefix < PrefixID.Count) {
 						writer.Write(true);
-						writer.Write((byte)item.prefix, NetCompression.GetBitSize(PrefixID.Count));
+						writer.Write((byte)prefix, NetCompression.GetBitSize(PrefixID.Count));
 					} else
 						writer.Write(false);
 				}
@@ -468,6 +463,10 @@ namespace MagicStorage.Common.IO {
 		}
 
 		public static List<Item> LoadItems(ValueReader reader, bool readStacks = true, bool readFavorites = true, int? listCountBitSizeOverride = null) {
+			return LoadItems(reader, readStacks, readFavorites, listCountBitSizeOverride, diagnosticContext: null);
+		}
+
+		internal static List<Item> LoadItems(ValueReader reader, bool readStacks, bool readFavorites, int? listCountBitSizeOverride, string? diagnosticContext) {
 			StackCompressor maxStackReader = new();
 			ItemContentNameLookup contentLookup = new();
 			GenericKeyLookup tagKeyLookup = new();
@@ -505,10 +504,8 @@ namespace MagicStorage.Common.IO {
 					if (error is AggregateException aggregate)
 						error = aggregate.Flatten();
 
-					if (item is not null)
-						MagicStorageMod.Instance.Logger.Error($"Error loading item \"{item.IdentifierAndStack()}\" from compressed stream", error);
-					else
-						MagicStorageMod.Instance.Logger.Error($"Error loading unknown item from compressed stream", error);
+					string context = diagnosticContext is null ? $"itemIndex={i}" : $"{diagnosticContext}, itemIndex={i}";
+					MagicStorageMod.Instance.Logger.Error($"Error loading compressed item ({context}, itemCount={itemCount})", error);
 				}
 
 				if (item is { IsAir: false })
@@ -535,11 +532,6 @@ namespace MagicStorage.Common.IO {
 					contentLookup.AddContent(unloadedItem.ItemName);
 
 					data = unloadedItem.data;
-				} else if (modItem is BaseErrorDummyItem errorItem) {
-					contentLookup.AddMod(errorItem.OriginalMod);
-					contentLookup.AddContent(errorItem.OriginalName);
-
-					data = errorItem.data;
 				} else {
 					contentLookup.Add(modItem);
 
@@ -556,10 +548,8 @@ namespace MagicStorage.Common.IO {
 				data = null;
 
 			int prefix = item.prefix;
-			if (item.ModItem is BaseErrorDummyItem errorItemForPrefix)
-				prefix = errorItemForPrefix.OriginalPrefix;
 
-			if (PrefixLoader.GetPrefix(item.prefix) is ModPrefix modPrefix) {
+			if (PrefixLoader.GetPrefix(prefix) is ModPrefix modPrefix) {
 				if (modPrefix is UnloadedPrefix) {
 					var globalItem = item.GetGlobalItem<UnloadedGlobalItem>();
 					contentLookup.AddMod(globalItem.ModPrefixMod);

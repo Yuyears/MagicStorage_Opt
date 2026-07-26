@@ -133,7 +133,7 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 			requiredTiles.UnionWith(recipe.requiredTile);
 			requiredConditions.UnionWith(recipe.Conditions);
 
-			Item createItem = recipe.createItem.Clone();
+			Item createItem = recipe.createItem;
 			ProduceItem(createItem.type, createItem.stack * batches, createItem.prefix);
 		}
 

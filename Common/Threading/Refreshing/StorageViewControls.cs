@@ -1,8 +1,10 @@
 ﻿using MagicStorage.Common.Systems;
 using MagicStorage.CrossMod;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using Terraria;
 
 namespace MagicStorage.Common.Threading.Refreshing {
@@ -70,6 +72,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 		/// </list>
 		/// </summary>
 		public readonly string itemTooltipSearchText;
+		private readonly ConcurrentDictionary<int, Lazy<bool>> _tooltipSearchCache = [];
 
 		/// <summary>
 		/// Whether only favorited items/recipes will appear
@@ -135,6 +138,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 			string modSearchText,
 			string itemNameSearchText,
 			string itemTooltipSearchText,
+			ConcurrentDictionary<int, Lazy<bool>> tooltipSearchCache,
 			bool showOnlyFavorites,
 			int modSearchOption
 		) {
@@ -145,6 +149,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 			this.modSearchText = modSearchText;
 			this.itemNameSearchText = itemNameSearchText;
 			this.itemTooltipSearchText = itemTooltipSearchText;
+			_tooltipSearchCache = tooltipSearchCache;
 			this.showOnlyFavorites = showOnlyFavorites;
 			this.modSearchOption = modSearchOption;
 		}
@@ -161,6 +166,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 				modSearchText,
 				itemNameSearchText,
 				itemTooltipSearchText,
+				_tooltipSearchCache,
 				showOnlyFavorites,
 				modSearchOption
 			);
@@ -193,6 +199,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 					modSearchText,
 					itemNameSearchText,
 					itemTooltipSearchText,
+					_tooltipSearchCache,
 					showOnlyFavoritesOverride ?? showOnlyFavorites,
 					modSearchOptionOverride ?? modSearchOption
 				);
@@ -337,9 +344,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 
 			if (!string.IsNullOrEmpty(itemTooltipSearchText)) {
 				try {
-					// Local capturing
-					string s = itemTooltipSearchText;
-					if (!Utility.GetItemTooltipLines(item).Any(line => line.Contains(s, StringComparison.OrdinalIgnoreCase)))
+					if (!_tooltipSearchCache.GetOrAdd(item.type, static (type, text) => new(() => Utility.ItemTooltipContains(type, text), LazyThreadSafetyMode.ExecutionAndPublication), itemTooltipSearchText).Value)
 						return false;
 				} catch {
 					return false;

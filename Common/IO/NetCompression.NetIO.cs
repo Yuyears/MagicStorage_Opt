@@ -21,7 +21,7 @@ namespace MagicStorage.Common.IO {
 			var tier4 = tier3.CreateSuccessive         (prefix: 0b011, 3, size: 131072u);
 			var tier5 = tier4.CreateSuccessiveUnbounded(prefix: 0b111, 3);
 
-			lengthTiers = new LengthCompressor<uint>(tier0, tier1, tier2, tier3, tier4, tier5);
+			lengthTiers = new LengthCompressor<uint>(tier3, [tier0, tier1, tier2, tier3, tier4, tier5]);
 		}
 
 		public static void SendItem(Item item, BinaryWriter writer, bool writeStack = true, bool writeFavorite = true) {

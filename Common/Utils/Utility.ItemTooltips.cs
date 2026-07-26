@@ -5,13 +5,26 @@ using Terraria;
 using Terraria.GameContent.UI;
 using Terraria.ID;
 using Terraria.ModLoader;
+using Terraria.UI;
 
 namespace MagicStorage {
 	partial class Utility {
 		/// <summary>
 		/// Gets the tooltip text lines Terraria would render for <paramref name="item"/>.
 		/// </summary>
-		public static List<string> GetItemTooltipLines(Item item) {
+		public static List<string> GetItemTooltipLines(Item item) => [.. GetItemTooltipLinesRaw(item).Select(static line => line.Text)];
+
+		internal static bool ItemTooltipContains(int itemType, string text) {
+			ItemTooltip tooltip = Lang.GetTooltip(itemType);
+			for (int i = 0; i < tooltip.Lines; i++) {
+				if (tooltip.GetLine(i).Contains(text, StringComparison.OrdinalIgnoreCase))
+					return true;
+			}
+
+			return false;
+		}
+
+		private static List<TooltipLine> GetItemTooltipLinesRaw(Item item) {
 			Item hoverItem = item;
 			int yoyoLogo = -1;
 			int researchLine = -1;
@@ -35,10 +48,6 @@ namespace MagicStorage {
 			string[] toolTipLine = new string[maxLines];
 			bool[] preFixLine = new bool[maxLines];
 			bool[] badPreFixLine = new bool[maxLines];
-			for (int i = 0; i < maxLines; i++) {
-				preFixLine[i] = false;
-				badPreFixLine[i] = false;
-			}
 			string[] toolTipNames = new string[maxLines];
 
 			Main.MouseText_DrawItemTooltip_GetLinesInfo(item, ref yoyoLogo, ref researchLine, oldKB, ref numLines, toolTipLine, preFixLine, badPreFixLine, toolTipNames, out int prefixlineIndex);
@@ -120,9 +129,7 @@ namespace MagicStorage {
 				}
 			}
 
-			List<TooltipLine> lines = ItemLoader.ModifyTooltips(item, ref numLines, toolTipNames, ref toolTipLine, ref preFixLine, ref badPreFixLine, ref yoyoLogo, out _, prefixlineIndex);
-
-			return [.. lines.Select(line => line.Text)];
+			return ItemLoader.ModifyTooltips(item, ref numLines, toolTipNames, ref toolTipLine, ref preFixLine, ref badPreFixLine, ref yoyoLogo, out _, prefixlineIndex);
 		}
 	}
 }

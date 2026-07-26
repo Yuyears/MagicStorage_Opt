@@ -55,7 +55,7 @@ namespace MagicStorage.Common.Commands {
 			Require(InboundPacketGuard.GetDirection(MessageType.ShimmerItemInStorageResult) == PacketDirection.ServerToClient, "Clients can forge shimmer completion responses.");
 			Require(InboundPacketGuard.GetDirection(MessageType.RequestShimmerItemInStorage) == PacketDirection.ClientToServer, "Shimmer requests were not client-to-server only.");
 			Require(InboundPacketGuard.GetDirection(MessageType.CraftOutcome) == PacketDirection.ServerToClient, "Clients can forge authoritative craft outcomes.");
-			Require(Enum.GetValues<TECraftingAccess.Operation>().Length == 3, "Unexpected crafting station operation was exposed.");
+			Require(Enum.GetValues<TECraftingAccess.Operation>().Length == 4, "Unexpected crafting station operation was exposed.");
 			Require(Enum.GetValues<PlayerBankInventory>().Length == 4, "Unexpected player bank inventory was exposed.");
 			Require(InboundPacketGuard.IsValidInventorySlot(0) && InboundPacketGuard.IsValidInventorySlot(58), "Valid player inventory slots were rejected.");
 			Require(!InboundPacketGuard.IsValidInventorySlot(-1) && !InboundPacketGuard.IsValidInventorySlot(59), "Invalid player inventory slots were accepted.");

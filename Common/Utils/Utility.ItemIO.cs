@@ -65,7 +65,8 @@ namespace MagicStorage {
 			if (prefix == ModContent.PrefixType<UnloadedPrefix>() && (readData.modPrefixMod is null || readData.modPrefixName is null))
 				prefix = 0;
 
-			Item item = new Item(type, readData.stack, prefix);
+			Item item = new Item(type, readData.stack);
+			item.favorited = readData.favorite;
 
 			if (item.ModItem is not BaseErrorDummyItem errorItem)
 				throw new ArgumentException("Item type must be a " + nameof(BaseErrorDummyItem), nameof(type));
@@ -74,6 +75,7 @@ namespace MagicStorage {
 
 			errorItem.OriginalMod = modName ?? "<unknown>";
 			errorItem.OriginalName = name ?? "<unknown>";
+			errorItem.OriginalPrefix = prefix;
 			errorItem.data = data;
 
 			if (prefix == ModContent.PrefixType<UnloadedPrefix>()) {

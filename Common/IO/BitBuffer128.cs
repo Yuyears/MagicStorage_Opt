@@ -147,32 +147,32 @@ namespace MagicStorage.Common.IO {
 			if (numBits == 0)
 				return;
 
-			if (typeof(T) == typeof(ulong) && numBits == MAX_LONG) {
-				ulong raw = Unsafe.As<T, ulong>(ref value);
-				SetVariant((uint)raw, ref head, MAX_INT);
-				SetVariant((uint)(raw >> MAX_INT), ref head, MAX_INT);
-				return;
-			}
+			ulong raw;
+			if (typeof(T) == typeof(byte))
+				raw = Unsafe.As<T, byte>(ref value);
+			else if (typeof(T) == typeof(ushort))
+				raw = Unsafe.As<T, ushort>(ref value);
+			else if (typeof(T) == typeof(uint))
+				raw = Unsafe.As<T, uint>(ref value);
+			else
+				raw = Unsafe.As<T, ulong>(ref value);
 
-			int localHead = head;
-			GetDataAndHead(out var dataRef, ref localHead, numBits);
+			ulong mask = numBits == MAX_LONG ? ulong.MaxValue : (1uL << numBits) - 1;
+			raw &= mask;
 
-			if (typeof(T) == typeof(byte)) {
-				byte mask = (byte)(byte.MaxValue >> (MAX_BYTE - numBits));
-				dataRef.Value &= ~((ulong)mask << localHead);
-				dataRef.Value |= (ulong)(Unsafe.As<T, byte>(ref value) & mask) << localHead;
-			} else if (typeof(T) == typeof(ushort)) {
-				ushort mask = (ushort)(ushort.MaxValue >> (MAX_SHORT - numBits));
-				dataRef.Value &= ~((ulong)mask << localHead);
-				dataRef.Value |= (ulong)(Unsafe.As<T, ushort>(ref value) & mask) << localHead;
-			} else if (typeof(T) == typeof(uint)) {
-				uint mask = uint.MaxValue >> (MAX_INT - numBits);
-				dataRef.Value &= ~((ulong)mask << localHead);
-				dataRef.Value |= (ulong)(Unsafe.As<T, uint>(ref value) & mask) << localHead;
-			} else if (typeof(T) == typeof(ulong)) {
-				ulong mask = ulong.MaxValue >> (MAX_LONG - numBits);
-				dataRef.Value &= ~(mask << localHead);
-				dataRef.Value |= (Unsafe.As<T, ulong>(ref value) & mask) << localHead;
+			if (head < MAX_LONG) {
+				int lowBits = Math.Min(numBits, MAX_LONG - head);
+				ulong lowMask = lowBits == MAX_LONG ? ulong.MaxValue : (1uL << lowBits) - 1;
+				_qword0 = (_qword0 & ~(lowMask << head)) | ((raw & lowMask) << head);
+
+				int highBits = numBits - lowBits;
+				if (highBits > 0) {
+					ulong highMask = (1uL << highBits) - 1;
+					_qword1 = (_qword1 & ~highMask) | ((raw >> lowBits) & highMask);
+				}
+			} else {
+				int localHead = head - MAX_LONG;
+				_qword1 = (_qword1 & ~(mask << localHead)) | (raw << localHead);
 			}
 
 			head += numBits;

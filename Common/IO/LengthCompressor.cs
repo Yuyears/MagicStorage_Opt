@@ -5,6 +5,8 @@ using System.Runtime.CompilerServices;
 namespace MagicStorage.Common.IO {
 	public class LengthCompressor<T> where T : INumberBase<T>, IBinaryNumber<T>, IMinMaxValue<T> {
 		private readonly EncodingTier<T>[] _tiers;
+		private readonly EncodingTier<T>? _escapeTier;
+		private readonly T _escapeValue;
 
 		internal readonly byte _minPrefixBits;
 		internal readonly byte _maxPrefixBits;
@@ -23,7 +25,18 @@ namespace MagicStorage.Common.IO {
 			}
 		}
 
+		internal LengthCompressor(EncodingTier<T> escapeTier, EncodingTier<T>[] tiers) : this(tiers) {
+			_escapeTier = escapeTier;
+			_escapeValue = escapeTier.Minimum + T.CreateChecked((BigInteger.One << escapeTier.BitCount) - BigInteger.One);
+		}
+
 		public void WriteTo(ValueWriter writer, T value) {
+			if (_escapeTier is { } escapeTier && value > escapeTier.Maximum) {
+				escapeTier.WriteTo(writer, _escapeValue);
+				EncodingTier<T>.WriteBits(writer, value, (byte)(Unsafe.SizeOf<T>() * 8));
+				return;
+			}
+
 			foreach (var tier in _tiers) {
 				if (value >= tier.Minimum && value <= tier.Maximum) {
 					tier.WriteTo(writer, value);
@@ -39,8 +52,16 @@ namespace MagicStorage.Common.IO {
 
 			for (int size = _minPrefixBits; size <= _maxPrefixBits; size++) {
 				foreach (var tier in _tiers) {
-					if (tier.PrefixBitCount == size && tier.Prefix == prefix)
-						return tier.ReadFrom(reader);
+					if (tier.PrefixBitCount == size && tier.Prefix == prefix) {
+						T value = tier.ReadFrom(reader);
+						if (_escapeTier is { } escapeTier && tier == escapeTier && value == _escapeValue) {
+							value = EncodingTier<T>.ReadBits(reader, (byte)(Unsafe.SizeOf<T>() * 8));
+							if (value <= escapeTier.Maximum)
+								throw new InvalidOperationException("Escaped length must exceed the legacy tier maximum");
+						}
+
+						return value;
+					}
 				}
 
 				// IMPORTANT: Reading bits goes from LSB to MSB
@@ -51,6 +72,9 @@ namespace MagicStorage.Common.IO {
 		}
 
 		public int GetBitCost(T value) {
+			if (_escapeTier is { } escapeTier && value > escapeTier.Maximum)
+				return escapeTier.PrefixBitCount + escapeTier.BitCount + Unsafe.SizeOf<T>() * 8;
+
 			foreach (var tier in _tiers) {
 				if (value >= tier.Minimum && value <= tier.Maximum)
 					return tier.PrefixBitCount + tier.BitCount;
@@ -79,58 +103,64 @@ namespace MagicStorage.Common.IO {
 			writer.Write(Prefix, PrefixBitCount);
 
 			value -= Minimum;
+			WriteBits(writer, value, BitCount);
+		}
 
+		internal static void WriteBits(ValueWriter writer, T value, byte bitCount) {
 			if (typeof(T) == typeof(byte))
-				writer.Write(Unsafe.As<T, byte>(ref value), BitCount);
+				writer.Write(Unsafe.As<T, byte>(ref value), bitCount);
 			else if (typeof(T) == typeof(sbyte))
-				writer.Write((byte)Unsafe.As<T, sbyte>(ref value), BitCount);
+				writer.Write((byte)Unsafe.As<T, sbyte>(ref value), bitCount);
 			else if (typeof(T) == typeof(ushort))
-				writer.Write(Unsafe.As<T, ushort>(ref value), BitCount);
+				writer.Write(Unsafe.As<T, ushort>(ref value), bitCount);
 			else if (typeof(T) == typeof(short))
-				writer.Write((ushort)Unsafe.As<T, short>(ref value), BitCount);
+				writer.Write((ushort)Unsafe.As<T, short>(ref value), bitCount);
 			else if (typeof(T) == typeof(uint))
-				writer.Write(Unsafe.As<T, uint>(ref value), BitCount);
+				writer.Write(Unsafe.As<T, uint>(ref value), bitCount);
 			else if (typeof(T) == typeof(int))
-				writer.Write((uint)Unsafe.As<T, int>(ref value), BitCount);
+				writer.Write((uint)Unsafe.As<T, int>(ref value), bitCount);
 			else if (typeof(T) == typeof(ulong))
-				writer.Write(Unsafe.As<T, ulong>(ref value), BitCount);
+				writer.Write(Unsafe.As<T, ulong>(ref value), bitCount);
 			else if (typeof(T) == typeof(long))
-				writer.Write((ulong)Unsafe.As<T, long>(ref value), BitCount);
+				writer.Write((ulong)Unsafe.As<T, long>(ref value), bitCount);
 			else
 				throw new NotSupportedException($"Unsupported type: {typeof(T)}");
 		}
 
 		public T ReadFrom(ValueReader reader) {
-			T value;
+			return ReadBits(reader, BitCount) + Minimum;
+		}
 
+		internal static T ReadBits(ValueReader reader, byte bitCount) {
+			T value;
 			if (typeof(T) == typeof(byte)) {
-				byte read = reader.ReadByte(BitCount);
+				byte read = reader.ReadByte(bitCount);
 				value = Unsafe.As<byte, T>(ref read);
 			} else if (typeof(T) == typeof(sbyte)) {
-				sbyte read = (sbyte)reader.ReadByte(BitCount);
+				sbyte read = (sbyte)reader.ReadByte(bitCount);
 				value = Unsafe.As<sbyte, T>(ref read);
 			} else if (typeof(T) == typeof(ushort)) {
-				ushort read = reader.ReadUInt16(BitCount);
+				ushort read = reader.ReadUInt16(bitCount);
 				value = Unsafe.As<ushort, T>(ref read);
 			} else if (typeof(T) == typeof(short)) {
-				short read = (short)reader.ReadUInt16(BitCount);
+				short read = (short)reader.ReadUInt16(bitCount);
 				value = Unsafe.As<short, T>(ref read);
 			} else if (typeof(T) == typeof(uint)) {
-				uint read = reader.ReadUInt32(BitCount);
+				uint read = reader.ReadUInt32(bitCount);
 				value = Unsafe.As<uint, T>(ref read);
 			} else if (typeof(T) == typeof(int)) {
-				int read = (int)reader.ReadUInt32(BitCount);
+				int read = (int)reader.ReadUInt32(bitCount);
 				value = Unsafe.As<int, T>(ref read);
 			} else if (typeof(T) == typeof(ulong)) {
-				ulong read = reader.ReadUInt64(BitCount);
+				ulong read = reader.ReadUInt64(bitCount);
 				value = Unsafe.As<ulong, T>(ref read);
 			} else if (typeof(T) == typeof(long)) {
-				long read = (long)reader.ReadUInt64(BitCount);
+				long read = (long)reader.ReadUInt64(bitCount);
 				value = Unsafe.As<long, T>(ref read);
 			} else
 				throw new NotSupportedException($"Unsupported type: {typeof(T)}");
 
-			return value + Minimum;
+			return value;
 		}
 	}
 

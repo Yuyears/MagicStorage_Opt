@@ -10,6 +10,7 @@ using Terraria.DataStructures;
 using MagicStorage.Common.Systems;
 using MagicStorage.Common.IO;
 using System.Threading;
+using System.Diagnostics;
 
 namespace MagicStorage.Components
 {
@@ -20,19 +21,28 @@ namespace MagicStorage.Components
 			Withdraw,
 			WithdrawToInventory,
 			Deposit,
+			DepositCommit,
 		}
+
+		private static Item pendingDeposit;
+		private static Point16 pendingDepositPosition;
+		private static long nextOperationId, pendingDepositOperationId;
+		private static long pendingDepositStartedAt;
+		private static bool pendingDepositCommitSent;
 
 		private class NetOperation
 		{
-			public NetOperation(Operation _type, int _slot, int _client, Item _item = null)
+			public NetOperation(Operation _type, long _operationId, int _slot, int _client, Item _item = null)
 			{
 				type = _type;
+				operationId = _operationId;
 				slot = _slot;
 				client = _client;
 				item = _item;
 			}
 
 			public Operation type { get; }
+			public long operationId { get; }
 			public int slot { get; }
 			public int client { get; }
 			public Item item { get; }
@@ -78,29 +88,24 @@ namespace MagicStorage.Components
 						if (op.type == Operation.Withdraw || op.type == Operation.WithdrawToInventory)
 						{
 							Item item = WithdrawStation(op.slot);
-							if (!item.IsAir)
-							{
-								ModPacket packet = PrepareServerResult(op.type);
-								ItemIO.Send(item, packet, true, true);
-								packet.Send(op.client);
-							}
+							SendServerResult(Position, op.type, op.operationId, op.client, !item.IsAir, item);
+							if (item.IsAir)
+								continue;
 						}
 						else
 						{
 							Player player = Main.player[op.client];
-							if (!IsValidDepositSourceSlot(op.slot) || player?.active != true || !IsValidStationItem(op.item))
+							if (op.type != Operation.DepositCommit || !IsValidDepositSourceSlot(op.slot) || player?.active != true || !IsValidStationItem(op.item))
 								continue;
 
 							Item item = op.item;
 							int oldType = item.type;
+							int oldStationCount = stations.Count;
 							DepositStation(item);
 							player.inventory[op.slot] = item.Clone();
 							NetMessage.SendData(MessageID.SyncEquipment, op.client, -1, null, op.client, op.slot);
 
-							ModPacket packet = PrepareServerResult(op.type);
-							ItemIO.Send(item, packet, true, true);
-							packet.Write((ushort)oldType);
-							packet.Send(op.client);
+							SendServerResult(Position, op.type, op.operationId, op.client, accepted: stations.Count > oldStationCount, item, oldType);
 						}
 						NetHelper.SendTEUpdate(ID, Position);
 					}
@@ -114,28 +119,43 @@ namespace MagicStorage.Components
 			}
 		}
 
-		public void QClientOperation(BinaryReader reader, Operation op, int client)
+		public void QClientOperation(Operation op, long operationId, int slot, int client)
 		{
 			NetOperation netOp;
 			if (op == Operation.Withdraw || op == Operation.WithdrawToInventory)
 			{
-				byte slot = reader.ReadByte();
-				netOp = new NetOperation(op, slot, client);
+				if (slot < 0 || slot >= stations.Count) {
+					SendServerResult(Position, op, operationId, client, accepted: false, new Item());
+					return;
+				}
+
+				netOp = new NetOperation(op, operationId, slot, client);
 
 			//	NetHelper.PrintClientRequest(client, "Item Withdraw", Position);
 			}
 			else if (op == Operation.Deposit)
 			{
-				byte slot = reader.ReadByte();
 				Player player = Main.player[client];
-				if (Main.netMode != NetmodeID.Server || !IsValidDepositSourceSlot(slot) || player?.active != true)
+				Item item = IsValidDepositSourceSlot(slot) && player?.active == true ? player.inventory[slot] : null;
+				bool accepted = Main.netMode == NetmodeID.Server && CanDepositStation(item);
+				SendServerResult(Position, op, operationId, client, accepted, new Item());
+				return;
+			}
+			else if (op == Operation.DepositCommit)
+			{
+				Player player = Main.player[client];
+				if (Main.netMode != NetmodeID.Server || !IsValidDepositSourceSlot(slot) || player?.active != true) {
+					SendServerResult(Position, op, operationId, client, accepted: false, new Item());
 					return;
+				}
 
 				Item item = player.inventory[slot];
-				if (!IsValidStationItem(item))
+				if (!CanDepositStation(item)) {
+					SendServerResult(Position, op, operationId, client, accepted: false, item.Clone());
 					return;
+				}
 
-				netOp = new NetOperation(op, slot, client, item.Clone());
+				netOp = new NetOperation(op, operationId, slot, client, item.Clone());
 				item.TurnToAir();
 
 			//	NetHelper.PrintClientRequest(client, "Item Deposit", Position);
@@ -146,12 +166,18 @@ namespace MagicStorage.Components
 				clientOpQ.Enqueue(netOp);
 		}
 
-		private static ModPacket PrepareServerResult(Operation op)
+		internal static void SendServerResult(Point16 position, Operation op, long operationId, int client, bool accepted, Item item, int oldType = ItemID.None)
 		{
 			ModPacket packet = MagicStorageMod.Instance.GetPacket();
 			packet.Write((byte)MessageType.ServerStationOperationResult);
 			packet.Write((byte)op);
-			return packet;
+			packet.Write(operationId);
+			packet.Write(accepted);
+			packet.Write(position);
+			ItemIO.Send(item ?? new Item(), packet, true, true);
+			if (op == Operation.DepositCommit)
+				packet.Write((ushort)oldType);
+			packet.Send(client);
 		}
 
 		private ModPacket PrepareClientRequest(Operation op)
@@ -167,54 +193,52 @@ namespace MagicStorage.Components
 
 		private Item DepositStation(Item item)
 		{
-			NormalizeStations();
-			if (!IsValidStationItem(item))
+			if (!CanDepositStation(item))
 				return item;
 
-			if (stations.Count < ItemsTotal)
-			{
-				bool foundSame = false;
-				foreach (Item station in stations)
-				{
-					if (station.type == item.type)
-					{
-						foundSame = true;
-						break;
-					}
-				}
+			Item nItem = item.Clone();
+			nItem.stack = 1;
+			nItem.favorited = false;
+			stations.Add(nItem);
+			item.stack--;
+			if (item.stack <= 0)
+				item.SetDefaults();
 
-				if (!foundSame)
-				{
-					Item nItem = item.Clone();
-					nItem.stack = 1;
-					nItem.favorited = false;
-					stations.Add(nItem);
-					item.stack--;
-					if (item.stack <= 0)
-						item.SetDefaults();
-
-					if (Main.netMode != NetmodeID.Server)
-						UpdateRecipesFromStationAction(nItem);
-				}
-			}
+			if (Main.netMode != NetmodeID.Server)
+				UpdateRecipesFromStationAction(nItem);
 
 			return item;
+		}
+
+		private bool CanDepositStation(Item item) {
+			NormalizeStations();
+			return IsValidStationItem(item) && stations.Count < ItemsTotal && !stations.Any(station => station.type == item.type);
 		}
 
 		public Item TryDepositStation(Item item)
 		{
 			if (Main.netMode == NetmodeID.MultiplayerClient)
 			{
+				if (pendingDeposit is not null) {
+					if (!pendingDepositCommitSent && TEStorageHeart.IsNetworkOperationTimedOut(pendingDepositStartedAt, Stopwatch.GetTimestamp()))
+						ClearPendingDeposit();
+					else
+						return item;
+				}
+
 				int slot = DepositInventorySlot;
 				Main.LocalPlayer.inventory[slot] = item.Clone();
 				NetMessage.SendData(MessageID.SyncEquipment, number: Main.myPlayer, number2: slot);
+				pendingDeposit = item.Clone();
+				pendingDepositPosition = Position;
+				pendingDepositOperationId = Interlocked.Increment(ref nextOperationId);
+				pendingDepositStartedAt = Stopwatch.GetTimestamp();
+				pendingDepositCommitSent = false;
 
 				ModPacket packet = PrepareClientRequest(Operation.Deposit);
+				packet.Write(pendingDepositOperationId);
 				packet.Write((byte)slot);
 				packet.Send();
-
-				Main.LocalPlayer.inventory[slot].TurnToAir();
-				item.SetDefaults(0, true);
 			}
 			else
 			{
@@ -237,6 +261,52 @@ namespace MagicStorage.Components
 				UpdateRecipesFromStationAction(item);
 
 			return item;
+		}
+
+		internal static void ReceiveDepositPreparation(Point16 position, long operationId, bool accepted) {
+			if (pendingDeposit is null || pendingDepositPosition != position || pendingDepositOperationId != operationId)
+				return;
+
+			if (!accepted || !Utility.AreStrictlyEqual(Main.mouseItem, pendingDeposit, checkStack: true)) {
+				CancelPendingDeposit();
+				return;
+			}
+
+			Main.mouseItem.TurnToAir();
+			pendingDepositCommitSent = true;
+			ModPacket packet = MagicStorageMod.Instance.GetPacket();
+			packet.Write((byte)MessageType.ClientStationOperation);
+			packet.Write(position);
+			packet.Write((byte)Operation.DepositCommit);
+			packet.Write(operationId);
+			packet.Write((byte)DepositInventorySlot);
+			packet.Send();
+		}
+
+		internal static void ReceiveDepositCommit(Point16 position, long operationId, bool accepted, Item item) {
+			if (pendingDeposit is null || pendingDepositPosition != position || pendingDepositOperationId != operationId)
+				return;
+
+			if (!accepted && item.IsAir)
+				item = pendingDeposit;
+
+			Main.LocalPlayer.inventory[DepositInventorySlot] = item.Clone();
+			Main.mouseItem = item;
+			ClearPendingDeposit();
+		}
+
+		private static void CancelPendingDeposit() {
+			Main.LocalPlayer.inventory[DepositInventorySlot].TurnToAir();
+			NetMessage.SendData(MessageID.SyncEquipment, number: Main.myPlayer, number2: DepositInventorySlot);
+			ClearPendingDeposit();
+		}
+
+		internal static void ClearPendingDeposit() {
+			pendingDeposit = null;
+			pendingDepositPosition = default;
+			pendingDepositOperationId = 0;
+			pendingDepositStartedAt = 0;
+			pendingDepositCommitSent = false;
 		}
 
 		private void NormalizeStations() => stations.RemoveAll(static item => !IsValidStationItem(item));
@@ -314,6 +384,7 @@ namespace MagicStorage.Components
 			if (Main.netMode == NetmodeID.MultiplayerClient)
 			{
 				ModPacket packet = PrepareClientRequest(toInventory ? Operation.WithdrawToInventory : Operation.Withdraw);
+				packet.Write(Interlocked.Increment(ref nextOperationId));
 				packet.Write((byte) slot);
 				packet.Send();
 

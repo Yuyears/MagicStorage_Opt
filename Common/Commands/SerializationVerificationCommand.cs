@@ -34,12 +34,15 @@ namespace MagicStorage.Common.Commands {
 
 			Item taggedLocator = new(ModContent.ItemType<Locator>()) { favorited = true };
 			((Locator)taggedLocator.ModItem).Location = new(123, 456);
+			DeserializedNetItem failedMetadata = new() { type = ItemID.StoneBlock, stack = 37, prefix = PrefixID.Keen, favorite = true };
+			Item errorPlaceholder = Utility.PrepareFailureItem(BaseErrorDummyItem.NetReadFailItemType, failedMetadata.ToTagData(), failedMetadata);
 
 			(string name, List<Item> items)[] fixtures = [
 				("empty", []),
 				("single", [new Item(ItemID.StoneBlock, 37) { favorited = true }]),
 				("multi", [new Item(ItemID.DirtBlock, 1), new Item(ItemID.Torch, 73), new Item(ItemID.MagicMirror, 1) { favorited = true }]),
-				("modded-tagged", [taggedLocator])
+				("modded-tagged", [taggedLocator]),
+				("error-placeholder", [errorPlaceholder])
 			];
 
 			List<string> failures = [];
@@ -58,13 +61,15 @@ namespace MagicStorage.Common.Commands {
 			RunCheck("nested scopes", VerifyNestedScopes, failures, caller);
 			RunCheck("malformed metadata recovery", VerifyMalformedMetadataRecovery, failures, caller);
 			RunCheck("signed integer boundaries", VerifySignedIntegerBoundaries, failures, caller);
+			RunCheck("bit buffer boundaries", VerifyBitBufferBoundaries, failures, caller);
+			RunCheck("length tier boundaries", VerifyLengthTierBoundaries, failures, caller);
 			RunCheck("compressed string boundaries", VerifyStringBoundaries, failures, caller);
 			RunCheck("string scrambling boundaries", VerifyStringScramblingBoundaries, failures, caller);
 			RunCheck("component persistence keys", VerifyComponentPersistenceKeys, failures, caller);
 			RunCheck("audit record isolation", VerifyAuditRecordIsolation, failures, caller);
 			RunCheck("legacy audit password migration", VerifyLegacyAuditPasswordMigration, failures, caller);
 			RunCheck("unloaded item withdrawal identity", VerifyUnloadedItemWithdrawalIdentity, failures, caller);
-			totalChecks += 9;
+			totalChecks += 11;
 
 			if (failures.Count == 0)
 				caller.Reply($"Serialization verification passed: {totalChecks}/{totalChecks} checks.", Color.LightGreen);
@@ -88,6 +93,14 @@ namespace MagicStorage.Common.Commands {
 				Item right = actual[i];
 				if (right.type != left.type || right.stack != left.stack || right.prefix != left.prefix || right.favorited != left.favorited)
 					throw new InvalidOperationException($"Item {i} changed: expected type={left.type}, stack={left.stack}, prefix={left.prefix}, favorite={left.favorited}; received type={right.type}, stack={right.stack}, prefix={right.prefix}, favorite={right.favorited}.");
+
+				if (left.ModItem is BaseErrorDummyItem expectedError
+				&& (right.ModItem is not BaseErrorDummyItem actualError
+					|| actualError.OriginalMod != expectedError.OriginalMod
+					|| actualError.OriginalName != expectedError.OriginalName
+					|| actualError.OriginalPrefix != expectedError.OriginalPrefix
+					|| !TagCompoundComparer.SemanticallyEquals(actualError.data, expectedError.data)))
+					throw new InvalidOperationException($"Error placeholder {i} lost its original item data.");
 			}
 
 			if (!serialized.AsSpan().SequenceEqual(Serialize(actual)))
@@ -164,6 +177,48 @@ namespace MagicStorage.Common.Commands {
 			|| reader.ReadInt64(BitBuffer128.MAX_LONG) != long.MinValue
 			|| reader.ReadInt64(BitBuffer128.MAX_LONG) != long.MaxValue)
 				throw new InvalidOperationException("A full-width signed integer changed during round trip.");
+		}
+
+		private static void VerifyBitBufferBoundaries() {
+			for (int start = 1; start < 8; start++) {
+				for (byte width = 57; width <= 64; width++) {
+					BitBuffer128 buffer = new();
+					int head = 0;
+					for (int bit = 0; bit < start; bit++)
+						buffer.Set((bit & 1) != 0, ref head);
+
+					const ulong expected = 0xD6A5_9C3B_F078_4E21UL;
+					buffer.Set(expected, ref head, width);
+					for (int bit = 0; bit < start; bit++) {
+						if (buffer.GetBoolean(ref head) != ((bit & 1) != 0))
+							throw new InvalidOperationException($"Bit buffer prefix changed at start={start}, width={width}.");
+					}
+
+					ulong mask = width == 64 ? ulong.MaxValue : (1UL << width) - 1;
+					if (buffer.GetUInt64(ref head, width) != (expected & mask))
+						throw new InvalidOperationException($"Bit buffer value changed at start={start}, width={width}.");
+				}
+			}
+		}
+
+		private static void VerifyLengthTierBoundaries() {
+			uint[] expected = [0, 15, 16, 335, 336, 4431, 4432, 135503, 135504, uint.MaxValue];
+			if (NetCompression.lengthTiers.GetBitCost(4432) != 47)
+				throw new InvalidOperationException("Escaped length reported an incorrect bit cost.");
+
+			using MemoryStream stream = new();
+			ValueWriter writer = new(stream);
+			foreach (uint value in expected)
+				NetCompression.lengthTiers.WriteTo(writer, value);
+			writer.Flush();
+
+			stream.Position = 0;
+			ValueReader reader = new(new BinaryReader(stream));
+			foreach (uint value in expected) {
+				uint actual = NetCompression.lengthTiers.ReadFrom(reader);
+				if (actual != value)
+					throw new InvalidOperationException($"Length tier changed {value} to {actual}.");
+			}
 		}
 
 		private static void VerifyStringBoundaries() {

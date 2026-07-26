@@ -93,5 +93,7 @@ namespace MagicStorage.Common.Systems {
 		public override void PreSaveAndQuit() {
 			RequestingOperatorKey = false;
 		}
+
+		public override void OnWorldUnload() => TECraftingAccess.ClearPendingDeposit();
 	}
 }

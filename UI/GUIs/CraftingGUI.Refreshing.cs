@@ -7,6 +7,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Terraria;
 
 namespace MagicStorage {
@@ -84,7 +86,7 @@ namespace MagicStorage {
 
 			processed.resultItems.AddRange(storedItems);
 
-			thread.aggregateResults.CopyResultGroupsTo(processed.resultItemGroups.Value);
+			thread.aggregateResults.MoveResultGroupsTo(processed.resultItemGroups.Value);
 
 			int numModuleItems = 0;
 			processed.resultItemsFromModules.Clear();
@@ -104,7 +106,7 @@ namespace MagicStorage {
 				numModuleItems = moduleItems.Count;
 			}
 
-			SetCountsDictionaries(thread, storage.allStoredItems.Concat(processed.allModuleItems ?? []));
+			SetCountsDictionaries(thread, storage.allStoredItems, processed.moduleCountSnapshot ?? []);
 
 			thread.workingItemList = null;
 			thread.workingCounter = 0;
@@ -118,7 +120,7 @@ namespace MagicStorage {
 			where T : RefreshThread, IProcessedStorageItemsProvider
 		{
 			SetUnfilteredItems(thread.ProcessedStorageItems, storage);
-			SetCountsDictionaries(thread, storage.allStoredItems.Concat(thread.ProcessedStorageItems.allModuleItems ?? []));
+			SetCountsDictionaries(thread, storage.allStoredItems, thread.ProcessedStorageItems.moduleCountSnapshot ?? []);
 		}
 
 		private static void SetUnfilteredItems(ProcessedStorageItems processed, StorageItems storage)
@@ -139,6 +141,7 @@ namespace MagicStorage {
 		internal static void SetCountsDictionaries<T>(T thread, IEnumerable<Item> sourceItems)
 			where T : RefreshThread, IProcessedStorageItemsProvider
 		{
+			long countingStartedAt = System.Diagnostics.Stopwatch.GetTimestamp();
 			var processed = thread.ProcessedStorageItems;
 
 			var itemCounts = processed.itemCounts;
@@ -170,6 +173,90 @@ namespace MagicStorage {
 			}
 
 			processed.itemCountsHash.Value = GetCountsHash(itemCounts.Value);
+			thread.Performance.AddElapsed(RefreshPerformancePhase.Counting, countingStartedAt);
+		}
+
+		private static void SetCountsDictionaries<T>(T thread, IReadOnlyList<Item> storageItems, IReadOnlyList<ItemCountSnapshot> moduleItems)
+			where T : RefreshThread, IProcessedStorageItemsProvider
+		{
+			long countingStartedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+			var processed = thread.ProcessedStorageItems;
+			thread.InitTaskSchedule(storageItems.Count + moduleItems.Count, "Counting Items");
+
+			BuildItemCounts(
+				storageItems,
+				moduleItems,
+				processed.itemCounts.Value,
+				processed.itemCountsByPrefix.Value,
+				RefreshParallelism.DefaultWorkerCount,
+				thread.cancellationToken,
+				thread.Complete);
+
+			processed.itemCountsHash.Value = GetCountsHash(processed.itemCounts.Value);
+			thread.Performance.AddElapsed(RefreshPerformancePhase.Counting, countingStartedAt);
+		}
+
+		internal static void BuildItemCounts(
+			IReadOnlyList<Item> storageItems,
+			IReadOnlyList<ItemCountSnapshot> moduleItems,
+			Dictionary<int, int> itemCounts,
+			Dictionary<int, Dictionary<int, int>> itemCountsByPrefix,
+			int requestedWorkers,
+			CancellationToken cancellationToken = default,
+			Action<int> reportProgress = null,
+			int minimumParallelWorkItems = RefreshParallelism.MinimumParallelWorkItems)
+		{
+			ArgumentNullException.ThrowIfNull(storageItems);
+			ArgumentNullException.ThrowIfNull(moduleItems);
+			ArgumentNullException.ThrowIfNull(itemCounts);
+			ArgumentNullException.ThrowIfNull(itemCountsByPrefix);
+
+			itemCounts.Clear();
+			itemCountsByPrefix.Clear();
+			int total = storageItems.Count + moduleItems.Count;
+			int workerCount = RefreshParallelism.ResolveWorkerCount(total, requestedWorkers, minimumParallelWorkItems);
+			Dictionary<int, int>[] localCounts = new Dictionary<int, int>[workerCount];
+			Dictionary<int, Dictionary<int, int>>[] localPrefixCounts = new Dictionary<int, Dictionary<int, int>>[workerCount];
+
+			void CountPartition(int worker) {
+				Dictionary<int, int> counts = localCounts[worker] = [];
+				Dictionary<int, Dictionary<int, int>> prefixCounts = localPrefixCounts[worker] = [];
+				int start = total * worker / workerCount;
+				int end = total * (worker + 1) / workerCount;
+
+				for (int index = start; index < end; index++) {
+					if ((index & 63) == 0)
+						cancellationToken.ThrowIfCancellationRequested();
+
+					ItemCountSnapshot item = index < storageItems.Count ? new ItemCountSnapshot(storageItems[index]) : moduleItems[index - storageItems.Count];
+					if (item.Type <= 0 || item.Stack <= 0)
+						continue;
+
+					counts[item.Type] = new ClampedArithmetic(counts.GetValueOrDefault(item.Type)) + item.Stack;
+					if (!prefixCounts.TryGetValue(item.Type, out Dictionary<int, int> byPrefix))
+						prefixCounts[item.Type] = byPrefix = [];
+					byPrefix[item.Prefix] = new ClampedArithmetic(byPrefix.GetValueOrDefault(item.Prefix)) + item.Stack;
+				}
+
+				reportProgress?.Invoke(end - start);
+			}
+
+			if (workerCount == 1)
+				CountPartition(0);
+			else
+				Parallel.For(0, workerCount, new ParallelOptions { MaxDegreeOfParallelism = workerCount, CancellationToken = cancellationToken }, CountPartition);
+
+			for (int worker = 0; worker < workerCount; worker++) {
+				foreach ((int type, int count) in localCounts[worker])
+					itemCounts[type] = new ClampedArithmetic(itemCounts.GetValueOrDefault(type)) + count;
+
+				foreach ((int type, Dictionary<int, int> localByPrefix) in localPrefixCounts[worker]) {
+					if (!itemCountsByPrefix.TryGetValue(type, out Dictionary<int, int> byPrefix))
+						itemCountsByPrefix[type] = byPrefix = [];
+					foreach ((int prefix, int count) in localByPrefix)
+						byPrefix[prefix] = new ClampedArithmetic(byPrefix.GetValueOrDefault(prefix)) + count;
+				}
+			}
 		}
 	}
 }

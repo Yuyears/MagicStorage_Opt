@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using Terraria;
 using Terraria.ID;
 using Terraria.ModLoader;
@@ -10,6 +11,8 @@ namespace MagicStorage.Components;
 public class TECreativeStorageUnit : TEAbstractStorageUnit
 {
 	private static Item?[]? Items;
+	private static IReadOnlyList<Item>? Snapshot;
+	private static int SnapshotItemCount;
 
 	public override bool IsFull => true;
 
@@ -38,6 +41,16 @@ public class TECreativeStorageUnit : TEAbstractStorageUnit
 			item.stack = item.maxStack;
 			yield return item;
 		}
+	}
+
+	internal override StorageUnitSnapshot GetItemSnapshot()
+	{
+		if (Snapshot is not null && SnapshotItemCount != ItemLoader.ItemCount)
+			Snapshot = null;
+
+		Snapshot ??= GetItems().Select(static item => item.Clone()).ToArray();
+		SnapshotItemCount = ItemLoader.ItemCount;
+		return new StorageUnitSnapshot(Position, 1, Snapshot);
 	}
 
 	public override void DepositItem(Item toDeposit)

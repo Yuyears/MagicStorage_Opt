@@ -1,5 +1,6 @@
 ﻿using MagicStorage.Common.Threading.Refreshing;
 using SerousCommonLib.API.Iterators;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -63,11 +64,27 @@ namespace MagicStorage.Common.Threading {
 		/// <summary>
 		/// Converts <paramref name="this"/> enumeration to a parallel query which checks the cancellation token of <paramref name="thread"/> every <paramref name="iterationsPerCheck"/> iterations.
 		/// </summary>
-		public static ParallelQuery<T> ToCancellableQuery<T>(this IEnumerable<T> @this, RefreshThread thread, int iterationsPerCheck) => @this.WatchForCancellation(thread, iterationsPerCheck).AsParallel();
+		public static ParallelQuery<T> ToCancellableQuery<T>(this IEnumerable<T> @this, RefreshThread thread, int iterationsPerCheck)
+			=> @this.WatchForCancellation(thread, iterationsPerCheck).AsParallel().WithDegreeOfParallelism(RefreshParallelism.WorkerCount);
 
 		/// <summary>
 		/// Converts <paramref name="this"/> enumeration to an ordered parallel query which checks the cancellation token of <paramref name="thread"/> every <paramref name="iterationsPerCheck"/> iterations.
 		/// </summary>
-		public static ParallelQuery<T> ToCancellableOrderedQuery<T>(this IEnumerable<T> @this, RefreshThread thread, int iterationsPerCheck) => @this.WatchForCancellation(thread, iterationsPerCheck).AsParallel().AsOrdered();
+		public static ParallelQuery<T> ToCancellableOrderedQuery<T>(this IEnumerable<T> @this, RefreshThread thread, int iterationsPerCheck)
+			=> @this.WatchForCancellation(thread, iterationsPerCheck).AsParallel().WithDegreeOfParallelism(RefreshParallelism.WorkerCount).AsOrdered();
+	}
+
+	internal static class RefreshParallelism {
+		internal const int DefaultWorkerCount = 4;
+		internal const int MaxWorkerCount = 8;
+		internal const int MinimumParallelWorkItems = 512;
+
+		internal static int WorkerCount => Math.Clamp(Environment.ProcessorCount, 1, DefaultWorkerCount);
+
+		internal static int ResolveWorkerCount(int workItemCount, int requestedWorkers = DefaultWorkerCount, int minimumParallelWorkItems = MinimumParallelWorkItems) {
+			if (workItemCount < minimumParallelWorkItems)
+				return 1;
+			return Math.Clamp(requestedWorkers, 1, Math.Min(MaxWorkerCount, Environment.ProcessorCount));
+		}
 	}
 }

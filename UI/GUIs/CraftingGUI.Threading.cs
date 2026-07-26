@@ -75,7 +75,6 @@ namespace MagicStorage {
 			}
 
 			protected override void CollectObjects() {
-				CraftingGUI.hasCompleteData = false;
 				CraftingGUI.ResetRecentRecipeCache();
 
 				var sandbox = new EnvironmentSandbox(Main.LocalPlayer, base.Heart);
@@ -107,7 +106,13 @@ namespace MagicStorage {
 				foreach (var module in base.Heart.GetModules())
 					module.PostRefreshRecipes(sandbox);
 
+				EnsureStorageSnapshotIsCurrent();
 				InitTaskSchedule(7, "Updating Caches");
+			}
+
+			protected override void Cleanup() {
+				if (!HasSuccessfulCompletion)
+					return;
 
 				ProcessedStorageItems.CopyToStaticCollectionsAndFields();
 				CompleteOne();
@@ -128,21 +133,12 @@ namespace MagicStorage {
 				StorageGUI.hasAnyErrorItems = base.foundErrorItem;
 				MagicUI.lastKnownSearchBarErrorReason = base.searchBarError;
 				CraftingGUI.lastKnownRecursionErrorForStoredItems = base.storedItemsError;
-
 				CraftingGUI.hasCompleteData = true;
 				RefreshTiming.Report("full");
 			}
 
-			protected override void Cleanup() { }
-
 			public override void ClearStaticCollections() {
-				ProcessedStorageItems.ClearStaticCollections();
-				MainZoneObjectsResults.ClearStaticCollections();
-				IngredientControls.ClearStaticCollections();
-				CraftObjectAvailableCache.ClearStaticCollection();
-				RecipeSimulations.ClearStaticCollection();
-				RecipeItems.ClearStaticCollections();
-				StorageGUI.hasAnyErrorItems = false;
+				// Keep the last complete view while the replacement snapshot is validated.
 			}
 
 			// Unused due to being a full thread
@@ -156,6 +152,7 @@ namespace MagicStorage {
 			private readonly bool _refreshInventorySnapshot;
 			private readonly bool _refreshSelectedRecipeSnapshot;
 			private readonly HashSet<int> _focusedGraphFrontierItemTypes;
+			private StorageItems _storageItemsSnapshot;
 
 			public override bool IsPartialThread => true;
 
@@ -220,17 +217,10 @@ namespace MagicStorage {
 					module.PreRefreshRecipes(sandbox);
 
 				if (_refreshInventorySnapshot) {
-					StorageItems storageItems = new();
-					storageItems.CollectObjects(this);
+					_storageItemsSnapshot = new StorageItems();
+					_storageItemsSnapshot.CollectObjects(this);
 					ProcessedStorageItems.CollectObjects(this);
 					IngredientControls.CollectObjects(this);
-
-					if (_refreshSelectedRecipeSnapshot)
-						CraftingGUI.LoadItemsAndSetDictionaryInfo(this, storageItems);
-					else {
-						ProcessedStorageItems.CopyDisplayCollectionsFromStatic();
-						CraftingGUI.LoadInventoryCountsOnly(this, storageItems);
-					}
 				} else {
 					ProcessedStorageItems.CopyFromStaticCollectionsAndFields();
 					IngredientControls.CopyFromStaticCollectionsAndFields();
@@ -244,17 +234,26 @@ namespace MagicStorage {
 				MainZoneObjectsFilterControls.filterProvider = new StandardRecipeFilterProvider(this);
 
 				RecipeSnapshots.CollectObjects();
-				PrepareInventoryCraftabilityGraph(
-					this,
-					ShouldBuildInventoryCraftabilityGraphForPartial(this, _refreshInventorySnapshot),
-					_focusedGraphFrontierItemTypes,
-					MainZoneObjectsResults.objectsToRefresh);
 
 				foreach (EnvironmentModule module in base.Heart.GetModules())
 					module.ResetPlayer(sandbox);
 			}
 
 			protected override void Execute() {
+				if (_refreshInventorySnapshot) {
+					if (_refreshSelectedRecipeSnapshot)
+						CraftingGUI.LoadItemsAndSetDictionaryInfo(this, _storageItemsSnapshot);
+					else {
+						ProcessedStorageItems.CopyDisplayCollectionsFromStatic();
+						CraftingGUI.LoadInventoryCountsOnly(this, _storageItemsSnapshot);
+					}
+				}
+
+				PrepareInventoryCraftabilityGraph(
+					this,
+					ShouldBuildInventoryCraftabilityGraphForPartial(this, _refreshInventorySnapshot),
+					_focusedGraphFrontierItemTypes,
+					MainZoneObjectsResults.objectsToRefresh);
 				CraftingGUI.RefreshRecipes(this);
 
 				var sandbox = new EnvironmentSandbox(Main.LocalPlayer, base.Heart);
@@ -262,7 +261,13 @@ namespace MagicStorage {
 				foreach (var module in base.Heart.GetModules())
 					module.PostRefreshRecipes(sandbox);
 
+				EnsureStorageSnapshotIsCurrent();
 				InitTaskSchedule(_refreshSelectedRecipeSnapshot ? 7 : 5, "Updating Caches");
+			}
+
+			protected override void Cleanup() {
+				if (!HasSuccessfulCompletion)
+					return;
 
 				ProcessedStorageItems.CopyToStaticCollectionsAndFields();
 				CompleteOne();
@@ -282,22 +287,18 @@ namespace MagicStorage {
 
 					CraftingGUI.SetRecipeAndCraftingCaches(this);
 					CompleteOne();
-
 					CraftingGUI.lastKnownRecursionErrorForStoredItems = base.storedItemsError;
 				}
 
 				MagicUI.lastKnownSearchBarErrorReason = base.searchBarError;
-
 				CraftingGUI.hasCompleteData = true;
 				RefreshTiming.Report("recipe-list");
 			}
 
-			protected override void Cleanup() { }
-
 			public override void ClearStaticCollections() {
 				// Partial recipe-list refreshes are double-buffered: keep the last
 				// complete UI snapshot visible until this thread successfully
-				// publishes its recalculated providers in Execute().
+				// publishes its recalculated providers in Cleanup().
 			}
 
 			public override void PrepareUIZones() { }
@@ -340,6 +341,9 @@ namespace MagicStorage {
 			internal int RestoredSelectedPreviewAmountCraftable { get; private set; }
 			internal bool RestoredSelectedPreviewIsAvailable { get; private set; }
 			internal bool RestoredSelectedPreviewPassesBlock { get; private set; }
+			private Recipe _recipeForPublication;
+			private bool _restoredPreviewForPublication;
+			private int _recipeAmountTargetForPublication;
 
 			public RecipeInfoPanelRefreshThread(
 				StorageViewControls controls,
@@ -394,6 +398,9 @@ namespace MagicStorage {
 
 				var recipe = CraftingObject.selection.Value;
 				int recipeAmountTarget = CraftingObject.craftAmountTarget.Value;
+				_recipeForPublication = recipe;
+				_restoredPreviewForPublication = false;
+				_recipeAmountTargetForPublication = recipeAmountTarget;
 
 				if (ShouldCollectFullRecipeSnapshots(recipe))
 					RecipeSnapshots.CollectObjects(cancellationToken);
@@ -406,6 +413,7 @@ namespace MagicStorage {
 				}
 
 				bool restoredPreview = CraftingGUI.TryRestoreSelectedRecipePreviewCache(this, recipe);
+				_restoredPreviewForPublication = restoredPreview;
 				if (!restoredPreview)
 					CraftingGUI.RefreshStorageItems(this);
 
@@ -415,6 +423,12 @@ namespace MagicStorage {
 					module.PostRefreshRecipes(sandbox);
 
 				InitTaskSchedule(6, "Updating Caches");
+			}
+
+			protected override void Cleanup() {
+				if (!HasSuccessfulCompletion
+				|| !object.ReferenceEquals(CraftingObject.selection.StaticSource, CraftingObject.selection.Value))
+					return;
 
 				ProcessedStorageItems.CopyToStaticCollectionsAndFields();
 				CompleteOne();
@@ -426,21 +440,17 @@ namespace MagicStorage {
 				CraftingGUI.SetRecipeAndCraftingCaches(this);
 				CompleteOne();
 
-				if (!restoredPreview && CraftingObject.craftAmountTarget.Value == recipeAmountTarget)
-					CraftingGUI.StoreSelectedRecipePreviewCache(this, recipe);
+				if (!_restoredPreviewForPublication && CraftingObject.craftAmountTarget.Value == _recipeAmountTargetForPublication)
+					CraftingGUI.StoreSelectedRecipePreviewCache(this, _recipeForPublication);
 
 				CraftObjectAvailableCache.CopyToStaticCollection();
 				CompleteOne();
 				RecipeSimulations.CopyToStaticCollection();
 				CompleteOne();
-				
 				CraftingGUI.lastKnownRecursionErrorForStoredItems = base.storedItemsError;
-
 				CraftingGUI.hasCompleteData = true;
 				RefreshTiming.Report("selected-preview");
 			}
-
-			protected override void Cleanup() { }
 
 			public override void ClearStaticCollections() {
 				// Partial recipe-panel refreshes are double-buffered.  The old
@@ -497,11 +507,14 @@ namespace MagicStorage {
 			public override void SetResultItem(Item item) {
 				if (!base.itemResolver.IsModuleItem(item)) {
 					// Items from storage
-					resultItem.Value = item;
+					if (!hasStorageResult)
+						resultItem.Value = null;
+
+					resultItem.Value = AggregateCompatibleResultItem(resultItem.Value, item);
 					hasStorageResult = true;
 				} else if (!hasStorageResult && !base.itemResolver.IsInventoryModuleItem(item)) {
 					// Items from modules that aren't the Player Inventory modules
-					resultItem.Value = item;
+					resultItem.Value = AggregateCompatibleResultItem(resultItem.Value, item);
 				}
 			}
 		}

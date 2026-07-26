@@ -1,4 +1,5 @@
-﻿using MagicStorage.Common.Systems.RecurrentRecipes;
+﻿using MagicStorage.Common;
+using MagicStorage.Common.Systems.RecurrentRecipes;
 using MagicStorage.Common.Threading;
 using MagicStorage.Common.Threading.Refreshing;
 using MagicStorage.CrossMod;
@@ -32,6 +33,19 @@ namespace MagicStorage {
 		internal static string lastKnownRecursionErrorForObjects;
 
 		internal static Item result;
+
+		internal static Item AggregateCompatibleResultItem(Item current, Item incoming) {
+			if (incoming is null || incoming.IsAir)
+				return current;
+
+			if (current is null || current.IsAir)
+				return incoming.Clone();
+
+			if (StorageAggregator.CanCombineItems(current, incoming, checkPrefix: true, strict: true, savedItemTagIO: null))
+				current.stack = new ClampedArithmetic(current.stack) + incoming.stack;
+
+			return current;
+		}
 
 		private static void RefreshStorageItems<T>(T thread)
 			where T : RefreshThread, IProcessedStorageItemsProvider, IMainZoneFilterControlsProvider, IIngredientControlsProvider, ICraftingObjectProvider<Recipe>, IRecipeItemsProvider, IRecipeSimulationsProvider, IRecipeSnapshotsProvider

@@ -11,6 +11,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 
 	public class ProcessedStorageItems {
 		public List<Item> allModuleItems;
+		internal List<ItemCountSnapshot> moduleCountSnapshot;
 		/// <summary>
 		/// <b>NOTE:</b> Value doesn't matter; the item is from a module if, and only if, this table has it as a key
 		/// </summary>
@@ -53,6 +54,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 			var sandbox = new EnvironmentSandbox(Main.LocalPlayer, thread.Heart);
 
 			allModuleItems = [];
+			moduleCountSnapshot = [];
 
 			foreach (var module in thread.Heart.GetModules()) {
 				var items = module.GetAdditionalItems(sandbox);
@@ -67,8 +69,10 @@ namespace MagicStorage.Common.Threading.Refreshing {
 						continue;
 
 					if (wasModuleItem.TryAdd(item, null)) {
-						if (!inventoryItems || moduleItemWasFromInventory.TryAdd(item, null))
+						if (!inventoryItems || moduleItemWasFromInventory.TryAdd(item, null)) {
 							allModuleItems.Add(item);
+							moduleCountSnapshot.Add(new ItemCountSnapshot(item));
+						}
 					}
 				}
 			}

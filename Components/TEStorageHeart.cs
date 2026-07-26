@@ -79,7 +79,33 @@ namespace MagicStorage.Components
 		private readonly Dictionary<long, PendingNetworkOperation> pendingNetworkOperations = new();
 		private long lastNetworkRevision;
 		private long networkRevision;
+		private readonly List<TEAbstractStorageUnit> storageUnitSnapshot = [];
+		private readonly Dictionary<Point16, long> storageRemoteTopologyRevisions = [];
+		private long storageLocalTopologyRevision = -1;
+		private long storageTopologyRevision;
+		private long storageContentRevision;
+		private readonly object storageChangeLock = new();
+		private readonly HashSet<Point16> changedStorageUnits = [];
+		private readonly HashSet<int> changedStorageItemTypes = [];
+		private readonly object storageRoutingLock = new();
+		private readonly Dictionary<Point16, StorageUnitRouteState> storageUnitRoutes = [];
+		private readonly Dictionary<ItemData, List<TEAbstractStorageUnit>> storageMergeRoutes = [];
+		private readonly Dictionary<int, List<TEAbstractStorageUnit>> storageWithdrawRoutes = [];
+		private readonly List<TEAbstractStorageUnit> storageFreeSlotRoutes = [];
+		private readonly HashSet<TEAbstractStorageUnit> storageRouteUnits = [];
+		private readonly Dictionary<TEAbstractStorageUnit, int> storageRouteOrder = [];
+		private readonly Dictionary<ItemData, long> storageIdentityTotals = [];
+		private readonly Dictionary<int, long> storageTypeTotals = [];
+		private long storageRoutingTopologyRevision = -1;
 		private long lastNetworkWarningAt;
+
+		private sealed class StorageUnitRouteState {
+			public readonly HashSet<ItemData> MergeableIdentities = [];
+			public readonly HashSet<int> Types = [];
+			public readonly Dictionary<ItemData, long> IdentityTotals = [];
+			public readonly Dictionary<int, long> TypeTotals = [];
+			public bool HasFreeSlot;
+		}
 
 		ConcurrentQueue<NetOperation> clientOpQ = new ConcurrentQueue<NetOperation>();
 		private readonly Queue<CraftingGUI.ServerCraftRequest> serverCraftQueue = new();
@@ -111,6 +137,232 @@ namespace MagicStorage.Components
 		internal bool netcodeUpdate;
 		internal int netDesync;
 		internal long NetworkRevision => networkRevision;
+		internal long StorageTopologyRevision => EnsureStorageTopology();
+		internal long StorageContentRevision => Interlocked.Read(ref storageContentRevision);
+
+		internal void NotifyStorageUnitChanged(Point16 unitPosition, IReadOnlyList<Item> previousItems, IReadOnlyList<Item> currentItems) {
+			lock (storageChangeLock) {
+				changedStorageUnits.Add(unitPosition);
+				foreach (Item item in previousItems)
+					changedStorageItemTypes.Add(item.type);
+				foreach (Item item in currentItems)
+					changedStorageItemTypes.Add(item.type);
+				Interlocked.Increment(ref storageContentRevision);
+			}
+
+			UpdateStorageRoutingIndex(unitPosition, currentItems);
+		}
+
+		internal void GetStorageChangeSummary(out int changedUnitCount, out int changedTypeCount) {
+			lock (storageChangeLock) {
+				changedUnitCount = changedStorageUnits.Count;
+				changedTypeCount = changedStorageItemTypes.Count;
+			}
+		}
+
+		internal void AcknowledgeStorageChanges(long publishedContentRevision) {
+			lock (storageChangeLock) {
+				if (storageContentRevision != publishedContentRevision)
+					return;
+
+				changedStorageUnits.Clear();
+				changedStorageItemTypes.Clear();
+			}
+		}
+
+		private long EnsureStorageTopology() {
+			ConnectedComponentManager manager = ComponentManager;
+			List<TERemoteAccess> remoteAccesses = [.. manager.GetRemoteAccessEntities()];
+			bool changed = storageLocalTopologyRevision != manager.TopologyRevision
+				|| storageRemoteTopologyRevisions.Count != remoteAccesses.Count;
+			if (!changed) {
+				foreach (TERemoteAccess remoteAccess in remoteAccesses) {
+					if (!storageRemoteTopologyRevisions.TryGetValue(remoteAccess.Position, out long revision)
+					|| revision != remoteAccess.ComponentManager.TopologyRevision) {
+						changed = true;
+						break;
+					}
+				}
+			}
+			if (!changed) {
+				foreach (TEAbstractStorageUnit unit in storageUnitSnapshot) {
+					if (!ReferenceEquals(unit, unit.Position.ResolveToTileEntity<TEAbstractStorageUnit>())) {
+						changed = true;
+						break;
+					}
+				}
+			}
+
+			if (!changed)
+				return storageTopologyRevision;
+
+			storageUnitSnapshot.Clear();
+			HashSet<Point16> seen = [];
+			foreach (Point16 position in manager.GetStorageUnits()) {
+				if (position.ResolveToTileEntity<TEAbstractStorageUnit>() is TEAbstractStorageUnit unit && seen.Add(position))
+					storageUnitSnapshot.Add(unit);
+			}
+
+			foreach (TERemoteAccess remoteAccess in remoteAccesses) {
+				foreach (Point16 position in remoteAccess.ComponentManager.GetStorageUnits()) {
+					if (position.ResolveToTileEntity<TEAbstractStorageUnit>() is TEAbstractStorageUnit unit && seen.Add(position))
+						storageUnitSnapshot.Add(unit);
+				}
+			}
+
+			storageLocalTopologyRevision = manager.TopologyRevision;
+			storageRemoteTopologyRevisions.Clear();
+			foreach (TERemoteAccess remoteAccess in remoteAccesses)
+				storageRemoteTopologyRevisions[remoteAccess.Position] = remoteAccess.ComponentManager.TopologyRevision;
+			return ++storageTopologyRevision;
+		}
+
+		private void EnsureStorageRoutingIndex() {
+			long topologyRevision = EnsureStorageTopology();
+			lock (storageRoutingLock) {
+				if (storageRoutingTopologyRevision == topologyRevision)
+					return;
+
+				storageUnitRoutes.Clear();
+				storageMergeRoutes.Clear();
+				storageWithdrawRoutes.Clear();
+				storageFreeSlotRoutes.Clear();
+				storageRouteUnits.Clear();
+				storageRouteOrder.Clear();
+				storageIdentityTotals.Clear();
+				storageTypeTotals.Clear();
+
+				for (int i = 0; i < storageUnitSnapshot.Count; i++) {
+					TEAbstractStorageUnit unit = storageUnitSnapshot[i];
+					storageRouteUnits.Add(unit);
+					storageRouteOrder[unit] = i;
+					AddStorageRoutes(unit, BuildStorageUnitRouteState(unit, unit.GetItemSnapshot().Items));
+				}
+
+				storageRoutingTopologyRevision = topologyRevision;
+			}
+		}
+
+		private void UpdateStorageRoutingIndex(Point16 unitPosition, IReadOnlyList<Item> currentItems) {
+			long topologyRevision = EnsureStorageTopology();
+			lock (storageRoutingLock) {
+				if (storageRoutingTopologyRevision != topologyRevision)
+					return;
+
+				TEAbstractStorageUnit unit = storageUnitSnapshot.FirstOrDefault(candidate => candidate.Position == unitPosition);
+				if (unit is null) {
+					storageRoutingTopologyRevision = -1;
+					return;
+				}
+
+				if (storageUnitRoutes.Remove(unitPosition, out StorageUnitRouteState previous))
+					RemoveStorageRoutes(unit, previous);
+				AddStorageRoutes(unit, BuildStorageUnitRouteState(unit, currentItems));
+			}
+		}
+
+		internal void NotifyStorageUnitRoutingChanged(TEAbstractStorageUnit unit)
+			=> UpdateStorageRoutingIndex(unit.Position, unit.GetItemSnapshot().Items);
+
+		private static StorageUnitRouteState BuildStorageUnitRouteState(TEAbstractStorageUnit unit, IReadOnlyList<Item> items) {
+			StorageUnitRouteState state = new() { HasFreeSlot = !unit.Inactive && !unit.IsFull };
+			foreach (Item item in items) {
+				if (item.IsAir)
+					continue;
+
+				ItemData identity = item;
+				state.Types.Add(item.type);
+				if (!unit.Inactive && item.stack < item.maxStack)
+					state.MergeableIdentities.Add(identity);
+				state.IdentityTotals[identity] = state.IdentityTotals.GetValueOrDefault(identity) + item.stack;
+				state.TypeTotals[item.type] = state.TypeTotals.GetValueOrDefault(item.type) + item.stack;
+			}
+			return state;
+		}
+
+		private void AddStorageRoutes(TEAbstractStorageUnit unit, StorageUnitRouteState state) {
+			storageUnitRoutes[unit.Position] = state;
+			foreach (ItemData identity in state.MergeableIdentities)
+				AddRoute(storageMergeRoutes, identity, unit);
+			foreach (int type in state.Types)
+				AddRoute(storageWithdrawRoutes, type, unit);
+			if (state.HasFreeSlot)
+				AddRouteInStorageOrder(storageFreeSlotRoutes, unit);
+			foreach ((ItemData identity, long count) in state.IdentityTotals)
+				storageIdentityTotals[identity] = storageIdentityTotals.GetValueOrDefault(identity) + count;
+			foreach ((int type, long count) in state.TypeTotals)
+				storageTypeTotals[type] = storageTypeTotals.GetValueOrDefault(type) + count;
+		}
+
+		private void RemoveStorageRoutes(TEAbstractStorageUnit unit, StorageUnitRouteState state) {
+			foreach (ItemData identity in state.MergeableIdentities)
+				RemoveRoute(storageMergeRoutes, identity, unit);
+			foreach (int type in state.Types)
+				RemoveRoute(storageWithdrawRoutes, type, unit);
+			storageFreeSlotRoutes.Remove(unit);
+			foreach ((ItemData identity, long count) in state.IdentityTotals)
+				RemoveTotal(storageIdentityTotals, identity, count);
+			foreach ((int type, long count) in state.TypeTotals)
+				RemoveTotal(storageTypeTotals, type, count);
+		}
+
+		private void AddRoute<TKey>(Dictionary<TKey, List<TEAbstractStorageUnit>> routes, TKey key, TEAbstractStorageUnit unit) {
+			if (!routes.TryGetValue(key, out List<TEAbstractStorageUnit> units))
+				routes[key] = units = [];
+			AddRouteInStorageOrder(units, unit);
+		}
+
+		private void AddRouteInStorageOrder(List<TEAbstractStorageUnit> units, TEAbstractStorageUnit unit) {
+			int order = storageRouteOrder[unit];
+			int index = units.FindIndex(candidate => storageRouteOrder[candidate] > order);
+			units.Insert(index < 0 ? units.Count : index, unit);
+		}
+
+		private static void RemoveRoute<TKey>(Dictionary<TKey, List<TEAbstractStorageUnit>> routes, TKey key, TEAbstractStorageUnit unit) {
+			if (!routes.TryGetValue(key, out List<TEAbstractStorageUnit> units))
+				return;
+			units.Remove(unit);
+			if (units.Count == 0)
+				routes.Remove(key);
+		}
+
+		private static void RemoveTotal<TKey>(Dictionary<TKey, long> totals, TKey key, long count) {
+			long remaining = totals.GetValueOrDefault(key) - count;
+			if (remaining > 0)
+				totals[key] = remaining;
+			else
+				totals.Remove(key);
+		}
+
+		private TEAbstractStorageUnit[] GetStorageMergeCandidates(Item item) {
+			EnsureStorageRoutingIndex();
+			lock (storageRoutingLock)
+				return storageMergeRoutes.TryGetValue(item, out List<TEAbstractStorageUnit> units) ? [.. units] : [];
+		}
+
+		private TEAbstractStorageUnit[] GetStorageWithdrawCandidates(int type) {
+			EnsureStorageRoutingIndex();
+			lock (storageRoutingLock)
+				return storageWithdrawRoutes.TryGetValue(type, out List<TEAbstractStorageUnit> units) ? [.. units] : [];
+		}
+
+		private TEAbstractStorageUnit[] GetStorageFreeSlotCandidates() {
+			EnsureStorageRoutingIndex();
+			lock (storageRoutingLock)
+				return [.. storageFreeSlotRoutes];
+		}
+
+		internal static IEnumerable<T> EnumerateIndexedCandidatesWithFallback<T>(IReadOnlyList<T> indexed, IReadOnlyList<T> all, IReadOnlySet<T> current) where T : class {
+			HashSet<T> yielded = [];
+			foreach (T candidate in indexed) {
+				if (current.Contains(candidate) && yielded.Add(candidate))
+					yield return candidate;
+			}
+			foreach (T candidate in all) {
+				if (yielded.Add(candidate))
+					yield return candidate;
+			}
+		}
 
 		internal long BeginClientOperation(PendingOperationKind kind) {
 			long operationId = Interlocked.Increment(ref nextClientOperationId);
@@ -163,6 +415,9 @@ namespace MagicStorage.Components
 
 		internal static bool ShouldAcceptNetworkRevision(long currentRevision, long incomingRevision)
 			=> incomingRevision >= currentRevision;
+
+		internal static bool IsStorageSnapshotCurrent(long expectedTopologyRevision, long expectedContentRevision, long currentTopologyRevision, long currentContentRevision)
+			=> expectedTopologyRevision == currentTopologyRevision && expectedContentRevision == currentContentRevision;
 
 		public IEnumerable<Item> UniqueItemsPutHistory => _uniqueItemsPutHistory.Items;
 		private int requestingHistory;
@@ -242,13 +497,9 @@ namespace MagicStorage.Components
 			NetHelper.ClientInformStorageHeartUsage(this);
 		}
 
-		public IEnumerable<TEAbstractStorageUnit> GetStorageUnits()
-		{
-			ConnectedComponentManager manager = ComponentManager;
-
-			IEnumerable<TEAbstractStorageUnit> remoteStorageUnits = manager.GetRemoteAccessEntities().SelectMany(remoteAccess => remoteAccess.ComponentManager.GetStorageUnitEntities());
-
-			return manager.GetStorageUnitEntities().Concat(remoteStorageUnits);
+		public IReadOnlyList<TEAbstractStorageUnit> GetStorageUnits() {
+			EnsureStorageTopology();
+			return storageUnitSnapshot;
 		}
 
 		public IEnumerable<TEEnvironmentAccess> GetEnvironmentSimulators() => ComponentManager.GetEnvironmentAccessEntities();
@@ -571,7 +822,8 @@ namespace MagicStorage.Components
 
 		public bool EmptyInactive()
 		{
-			TEStorageUnit inactiveUnit = GetStorageUnits().OfType<TEStorageUnit>().FirstOrDefault(unit => unit.Inactive && !unit.IsEmpty);
+			List<TEStorageUnit> storageUnits = GetStorageUnits().OfType<TEStorageUnit>().ToList();
+			TEStorageUnit inactiveUnit = storageUnits.FirstOrDefault(unit => unit.Inactive && !unit.IsEmpty);
 
 			if (inactiveUnit is null)
 			{
@@ -579,8 +831,8 @@ namespace MagicStorage.Components
 				return false;
 			}
 
-			foreach (TEAbstractStorageUnit abstractStorageUnit in GetStorageUnits())
-				if (abstractStorageUnit is TEStorageUnit { Inactive: false, IsEmpty: true } storageUnit && inactiveUnit.NumItems <= storageUnit.Capacity)
+			foreach (TEStorageUnit storageUnit in storageUnits)
+				if (!storageUnit.Inactive && storageUnit.IsEmpty && inactiveUnit.NumItems <= storageUnit.Capacity)
 				{
 					TEStorageUnit.SwapItems(inactiveUnit, storageUnit);
 					NetHelper.SendRefreshNetworkItems(Position, false, storageUnit.items.Select(static i => i.type));
@@ -593,7 +845,7 @@ namespace MagicStorage.Components
 
 			HashSet<int> typesToRefresh = new();
 
-			foreach (TEStorageUnit storageUnit in GetStorageUnits().OfType<TEStorageUnit>().Where(unit => !unit.Inactive))
+			foreach (TEStorageUnit storageUnit in storageUnits.Where(unit => !unit.Inactive))
 				while (storageUnit.HasSpaceFor(tryMove) && !tryMove.IsAir)
 				{
 					typesToRefresh.Add(tryMove.type);
@@ -622,10 +874,8 @@ namespace MagicStorage.Components
 		public bool Defragment()
 		{
 			TEStorageUnit emptyUnit = null;
-			foreach (TEAbstractStorageUnit abstractStorageUnit in GetStorageUnits())
+			foreach (TEStorageUnit storageUnit in GetStorageUnits().OfType<TEStorageUnit>())
 			{
-				if (abstractStorageUnit is not TEStorageUnit storageUnit)
-					continue;
 				if (emptyUnit is null && storageUnit.IsEmpty && !storageUnit.Inactive)
 				{
 					emptyUnit = storageUnit;
@@ -645,58 +895,30 @@ namespace MagicStorage.Components
 		public bool PackItems()
 		{
 			//Pack items within the storage units first
+			IReadOnlyList<TEAbstractStorageUnit> allUnits = GetStorageUnits();
+			List<(int Index, TEStorageUnit Unit)> storageUnits = [];
 			NetHelper.StartUpdateQueue();
-			foreach (TEAbstractStorageUnit abstractStorageUnit in GetStorageUnits()) {
-				if (abstractStorageUnit is not TEStorageUnit storageUnit)
+			for (int i = 0; i < allUnits.Count; i++) {
+				if (allUnits[i] is not TEStorageUnit storageUnit)
 					continue;
 
+				storageUnits.Add((i, storageUnit));
 				storageUnit.PackItems();
 			}
 			NetHelper.ProcessUpdateQueue();
 
 			NetHelper.StartUpdateQueue();
-			int index = -1, index2 = -1;
-			foreach (TEAbstractStorageUnit abstractStorageUnit in GetStorageUnits())
-			{
-				index++;
-
-				if (abstractStorageUnit is not TEStorageUnit storageUnit)
+			List<(int Index, TEStorageUnit Unit)> destinations = storageUnits.Where(static unit => !unit.Unit.Inactive).ToList();
+			List<(int Index, TEStorageUnit Unit)> sources = storageUnits.Where(static unit => !unit.Unit.IsEmpty).ToList();
+			foreach ((TEStorageUnit storageUnit, TEStorageUnit storageUnit2) in EnumerateOrderedCompactionCandidates(destinations, sources)) {
+				if (!storageUnit.FlattenFrom(storageUnit2, out List<Item> transferredItems))
 					continue;
 
-				//Ignore inactive units as the destination
-				if (storageUnit.Inactive)
-					continue;
+				NetHelper.Report(true, $"Items flattened between units {storageUnit.ID} and {storageUnit2.ID}");
 
-				foreach (TEAbstractStorageUnit abstractStorageUnit2 in GetStorageUnits())
-				{
-					index2++;
-
-					//Only flatten to units closer to the heart
-					if (index2 < index)
-						continue;
-
-					if (abstractStorageUnit2 is not TEStorageUnit storageUnit2)
-						continue;
-					
-					//Don't check a unit against itself
-					if (storageUnit.Position == storageUnit2.Position)
-						continue;
-
-					//Ignore empty units
-					if (storageUnit2.IsEmpty)
-						continue;
-
-					if (!storageUnit.FlattenFrom(storageUnit2, out List<Item> transferredItems))
-						continue;
-
-					NetHelper.Report(true, $"Items flattened between units {storageUnit.ID} and {storageUnit2.ID}");
-
-					NetHelper.ProcessUpdateQueue();
-					NetHelper.SendRefreshNetworkItems(Position, false, transferredItems.Select(static i => i.type).Distinct());
-					return true;
-				}
-
-				index2 = -1;
+				NetHelper.ProcessUpdateQueue();
+				NetHelper.SendRefreshNetworkItems(Position, false, transferredItems.Select(static i => i.type).Distinct());
+				return true;
 			}
 
 			NetHelper.ProcessUpdateQueue();
@@ -704,6 +926,13 @@ namespace MagicStorage.Components
 
 			compactStage++;
 			return false;
+		}
+
+		internal static IEnumerable<(T Destination, T Source)> EnumerateOrderedCompactionCandidates<T>(IReadOnlyList<(int Index, T Unit)> destinations, IReadOnlyList<(int Index, T Unit)> sources) where T : class {
+			foreach ((int destinationIndex, T destination) in destinations)
+				foreach ((int sourceIndex, T source) in sources)
+					if (sourceIndex >= destinationIndex && !ReferenceEquals(destination, source))
+						yield return (destination, source);
 		}
 
 		public void ResetCompactStage(int stage = 0)
@@ -722,7 +951,8 @@ namespace MagicStorage.Components
 			bool actualItem = !toDeposit.IsAir;
 			int oldStack = toDeposit.stack;
 			int remember = toDeposit.type;
-			foreach (TEAbstractStorageUnit storageUnit in GetStorageUnits())
+			IReadOnlyList<TEAbstractStorageUnit> allUnits = GetStorageUnits();
+			foreach (TEAbstractStorageUnit storageUnit in EnumerateIndexedCandidatesWithFallback(GetStorageMergeCandidates(toDeposit), allUnits, storageRouteUnits))
 				if (!storageUnit.Inactive && storageUnit.HasSpaceInStackFor(toDeposit))
 				{
 					storageUnit.DepositItem(toDeposit);
@@ -732,7 +962,7 @@ namespace MagicStorage.Components
 
 			bool prevNewAndShiny = toDeposit.newAndShiny;
 			toDeposit.newAndShiny = MagicStorageConfig.GlowNewItems && !_uniqueItemsPutHistory.Contains(toDeposit);
-			foreach (TEAbstractStorageUnit storageUnit in GetStorageUnits())
+			foreach (TEAbstractStorageUnit storageUnit in EnumerateIndexedCandidatesWithFallback(GetStorageFreeSlotCandidates(), allUnits, storageRouteUnits))
 				if (!storageUnit.Inactive && !storageUnit.IsFull)
 				{
 					storageUnit.DepositItem(toDeposit);
@@ -838,7 +1068,8 @@ namespace MagicStorage.Components
 			}
 
 			Item result = new();
-			foreach (TEAbstractStorageUnit storageUnit in GetStorageUnits())
+			IReadOnlyList<TEAbstractStorageUnit> allUnits = GetStorageUnits();
+			foreach (TEAbstractStorageUnit storageUnit in EnumerateIndexedCandidatesWithFallback(GetStorageWithdrawCandidates(lookFor.type), allUnits, storageRouteUnits))
 			{
 				if (storageUnit.HasItem(lookFor, true))
 				{
@@ -916,6 +1147,7 @@ namespace MagicStorage.Components
 				// Special case: destroying unloaded items should ignore data
 				if (type == ModContent.ItemType<UnloadedItem>()) {
 					foreach (TEStorageUnit storageUnit in ComponentManager.GetRealStorageUnitEntities()) {
+						bool changed = false;
 						for (int i = storageUnit.items.Count - 1; i >= 0; i--) {
 							Item storage = storageUnit.items[i];
 
@@ -923,8 +1155,11 @@ namespace MagicStorage.Components
 								// Destroy it
 								storageUnit.items.RemoveAt(i);
 								itemsDestroyed++;
+								changed = true;
 							}
 						}
+						if (changed)
+							storageUnit.PostChangeContents();
 					}
 
 					goto SkipToPostLogic;
@@ -986,21 +1221,31 @@ namespace MagicStorage.Components
 
 				HashSet<int> typesToRefresh = new();
 
-				foreach (Item item in GetStorageUnits().OfType<TEStorageUnit>().SelectMany(s => s.GetItems())) {
-					//Filter out air items and Unloaded Items (their data might belong to the mod they're from)
-					if (item is null || item.IsAir || item.ModItem is UnloadedItem)
-						continue;
+				foreach (TEStorageUnit storageUnit in GetStorageUnits().OfType<TEStorageUnit>()) {
+					bool unitChanged = false;
+					foreach (Item item in storageUnit.GetItems()) {
+						//Filter out air items and Unloaded Items (their data might belong to the mod they're from)
+						if (item is null || item.IsAir || item.ModItem is UnloadedItem || item._globals is not { Length: >0 } globalItems)
+							continue;
 
-					if (item._globals is not { Length: >0 } globalItems)
-						continue;
+						bool itemChanged = false;
+						// NOTE: items should only have one UnloadedGlobalItem, but the class is not "sealed", so having multiple is possible
+						foreach (UnloadedGlobalItem unloaded in globalItems.OfType<UnloadedGlobalItem>()) {
+							if (unloaded.data is { Count: > 0 }) {
+								unloaded.data.Clear();
+								itemChanged = true;
+							}
+						}
 
-					// NOTE: items should only have one UnloadedGlobalItem, but the class is not "sealed", so having multiple is possible
-					foreach (UnloadedGlobalItem unloaded in globalItems.OfType<UnloadedGlobalItem>()) {
-						// Clear the data
-						unloaded.data?.Clear();
+						if (itemChanged) {
+							unitChanged = didSomething = true;
+							itemsAffected++;
+							typesToRefresh.Add(item.type);
+						}
 					}
 
-					itemsAffected++;
+					if (unitChanged)
+						storageUnit.PostChangeContents();
 				}
 
 				if (didSomething) {

@@ -54,8 +54,10 @@ namespace MagicStorage.Components
 				if (tileEntity is TERemoteAccess remoteAccess && !remoteAccess.Loaded)
 					text = Language.GetTextValue($"Mods.MagicStorage.StorageAccessFailLoad");
 
-			if (GetHeart(i, j) is null)
+			if (GetHeart(i, j) is null) {
 				Main.NewText(text);
+				return true;
+			}
 
 			OpenStorage(Main.LocalPlayer, i, j);
 

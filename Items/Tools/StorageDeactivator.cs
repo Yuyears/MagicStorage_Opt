@@ -47,7 +47,10 @@ namespace MagicStorage.Items {
 								NetHelper.ClientSendDeactivate(storageUnit.Position, storageUnit.Inactive);
 							} else {
 								storageUnit.UpdateTileFrameWithNetSend();
-								storageUnit.GetHeart()?.ResetCompactStage();
+								if (storageUnit.GetHeart() is TEStorageHeart heart) {
+									heart.NotifyStorageUnitRoutingChanged(storageUnit);
+									heart.ResetCompactStage();
+								}
 							}
 						}
 					} else

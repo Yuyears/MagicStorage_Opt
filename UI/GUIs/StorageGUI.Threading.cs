@@ -2,6 +2,7 @@
 using MagicStorage.Common.Threading.Refreshing;
 using MagicStorage.CrossMod;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using Terraria;
 
 namespace MagicStorage {
@@ -9,6 +10,8 @@ namespace MagicStorage {
 		private class StorageRefreshThread : RefreshThread, IStorageItemsProvider {
 			public readonly HashSet<int> targetItemTypes;
 			public bool uniqueSlotPerItemStack;
+			private readonly List<Item> resultItems = [];
+			private readonly ConditionalWeakTable<Item, List<Item>> resultItemGroups = [];
 
 			public override bool IsPartialThread => false;
 
@@ -43,6 +46,7 @@ namespace MagicStorage {
 			}
 
 			protected override void Execute() {
+				EnsureStorageSnapshotIsCurrent();
 				IEnumerable<Item> items;
 
 				if (targetItemTypes is not { Count: > 0 }) {
@@ -64,15 +68,24 @@ namespace MagicStorage {
 				base.workingItemList = items;
 				base.workingFlag = uniqueSlotPerItemStack;
 
-				SortAndFilter(this);
+				SortAndFilter(this, resultItems, resultItemGroups);
+			}
+
+			protected override void Cleanup() {
+				if (!HasSuccessfulCompletion)
+					return;
+
+				StorageGUI.items.Clear();
+				StorageGUI.items.AddRange(resultItems);
+				StorageGUI.itemToSourceItems.Clear();
+				foreach ((Item item, List<Item> sources) in resultItemGroups)
+					StorageGUI.itemToSourceItems.Add(item, sources);
 
 				StorageGUI.hasAnyErrorItems = base.foundErrorItem;
 				MagicUI.lastKnownSearchBarErrorReason = base.searchBarError;
 			}
 
-			protected override void Cleanup() { }
-
-			public override void ClearStaticCollections() => StorageGUI.ClearAllCollections();
+			public override void ClearStaticCollections() { }
 
 			// Unused due to being a full thread
 			public override void PrepareUIZones() { }

@@ -118,9 +118,8 @@ namespace MagicStorage {
 
 				int mid = low + (high - low) / 2;
 				var midContext = CreateCraftingSimulationContext(thread, mid);
-				if (TryRunGraphBackedSimulation(thread, recursiveRecipe, mid, available, midContext, out var midSimulation)
-				&& midSimulation.AmountCrafted > 0)
-					low = midSimulation.AmountCrafted;
+				if (TryRunGraphBackedSimulation(thread, recursiveRecipe, mid, available, midContext, out _))
+					low = mid;
 				else
 					high = mid;
 			}

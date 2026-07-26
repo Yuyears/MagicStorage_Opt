@@ -24,7 +24,14 @@ namespace MagicStorage.Common {
 		private readonly ConditionalWeakTable<Item, byte[]> _cachedSaveData = [];
 
 		private bool _hasResults;
+		private int _sourceCount;
 		private int _groupCount;
+
+		/// <summary>
+		/// Whether aggregation retains source-item groups for the source enumeration APIs.<br/>
+		/// Defaults to <see langword="true"/> for compatibility.  Display refreshes only consume result groups and can disable this to avoid retaining duplicate source references.
+		/// </summary>
+		public bool RetainSourceGroups { get; set; } = true;
 
 		/// <summary>
 		/// The maximum amount of resulting item stacks that this aggregator should allow.<br/>
@@ -42,7 +49,7 @@ namespace MagicStorage.Common {
 		/// <summary>
 		/// How many source item stacks were examined, or zero if aggregation has not yet been performed.
 		/// </summary>
-		public int SourceCount => _hasResults ? _aggregatedSource.Count : 0;
+		public int SourceCount => _hasResults ? _sourceCount : 0;
 
 		/// <summary>
 		/// How many resulting item stacks are present, or zero if aggregation has not yet been performed.
@@ -209,6 +216,41 @@ namespace MagicStorage.Common {
 		}
 
 		/// <summary>
+		/// Transfers result-group ownership to <paramref name="destination"/> without cloning nested lists.<br/>
+		/// The result-item enumeration remains available, but result-group copy/enumeration APIs are empty until the next aggregation.
+		/// </summary>
+		public void MoveResultGroupsTo(List<List<Item>> destination) {
+			ArgumentNullException.ThrowIfNull(destination);
+
+			destination.Clear();
+			if (!_hasResults)
+				return;
+
+			destination.AddRange(_resultGroups);
+			_resultGroups.Clear();
+			_resultToGroup.Clear();
+		}
+
+		/// <summary>
+		/// Transfers result-group ownership to a result-item lookup table without cloning groups.<br/>
+		/// The result-item enumeration remains available, but result-group copy/enumeration APIs are empty until the next aggregation.
+		/// </summary>
+		public void MoveResultGroupsTo(ConditionalWeakTable<Item, List<Item>> lookupTable) {
+			ArgumentNullException.ThrowIfNull(lookupTable);
+
+			lookupTable.Clear();
+			if (!_hasResults)
+				return;
+
+			foreach (List<Item> group in _resultGroups)
+				foreach (Item item in group)
+					lookupTable.Add(item, group);
+
+			_resultGroups.Clear();
+			_resultToGroup.Clear();
+		}
+
+		/// <summary>
 		/// Aggregates the source collection of items into result item stacks.<br/>
 		/// If aggregation has already been performed, this method does nothing.
 		/// </summary>
@@ -237,6 +279,7 @@ namespace MagicStorage.Common {
 				bool forcedFavorite = false;
 				int resultLimit = ResultCountLimit ?? int.MaxValue;
 				int iteration = 0;
+				bool retainSourceGroups = RetainSourceGroups;
 
 				foreach (var source in _originalSource.OrderBy(static i => i.type).ThenBy(static i => i.prefix)) {
 					if ((++iteration & 0b1111) == 0)
@@ -246,15 +289,20 @@ namespace MagicStorage.Common {
 						// The first item group is being created
 						aggregateDestination = source.Clone();
 						currentResultGroup = [ aggregateDestination ];
-						currentSourceGroup = [ source ];
+						if (retainSourceGroups)
+							currentSourceGroup = [ source ];
 
 						_groupCount++;
 						
 						_results.Add(aggregateDestination);
 						_resultToGroup.Add(aggregateDestination, currentResultGroup);
 						_resultGroups.Add(currentResultGroup);
-						_aggregatedSourceToGroup.Add(source, currentSourceGroup);
-						_aggregatedSourceGroups.Add(currentSourceGroup);
+						if (retainSourceGroups) {
+							_aggregatedSource.Add(source);
+							_aggregatedSourceToGroup.Add(source, currentSourceGroup);
+							_aggregatedSourceGroups.Add(currentSourceGroup);
+						}
+						_sourceCount++;
 
 						// Both a result item was created and a source item was examined, so the property shouldn't be checked here
 						progressCounter++;
@@ -321,20 +369,24 @@ namespace MagicStorage.Common {
 
 						forcedFavorite = false;
 						currentResultGroup = [];
-						currentSourceGroup = [];
+						if (retainSourceGroups)
+							currentSourceGroup = [];
 
 						_resultGroups.Add(currentResultGroup);
-						_aggregatedSourceGroups.Add(currentSourceGroup);
+						if (retainSourceGroups)
+							_aggregatedSourceGroups.Add(currentSourceGroup);
 
 						_groupCount++;
 
 						OnNewResult(source, clone: true, ref aggregateDestination, currentResultGroup, ref progressCounter);
 					}
 
-					currentSourceGroup.Add(source);
-
-					_aggregatedSource.Add(source);
-					_aggregatedSourceToGroup.Add(source, currentSourceGroup);
+					if (retainSourceGroups) {
+						currentSourceGroup.Add(source);
+						_aggregatedSource.Add(source);
+						_aggregatedSourceToGroup.Add(source, currentSourceGroup);
+					}
+					_sourceCount++;
 
 					if (!IncrementCounterOnResult)
 						progressCounter++;
@@ -384,6 +436,7 @@ namespace MagicStorage.Common {
 			_aggregatedSourceGroups.Clear();
 			_cachedSaveData.Clear();
 			_hasResults = false;
+			_sourceCount = 0;
 			_groupCount = 0;
 			return this;
 		}

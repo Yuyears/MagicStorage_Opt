@@ -135,6 +135,10 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 				foreach (Recipe recipe in possibleRecipes) {
 					cancellationToken.ThrowIfCancellationRequested();
 					trace?.Add(depth, $"candidate exact child {DemandPlanningTrace.DescribeRecipe(recipe)} for {DemandPlanningTrace.DescribeItem(requiredItem.type)}");
+					if (recursionStack.Contains(recipe.RecipeIndex)) {
+						trace?.Add(depth, $"skip exact child {DemandPlanningTrace.DescribeRecipe(recipe)}: active recursion path");
+						continue;
+					}
 
 					// Block recursion that would require the blocked item type
 					if (ignoreItem > 0) {
@@ -309,7 +313,6 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 			const bool allowChildAlternateSameResult = true;
 			IReadOnlyList<InventoryCraftabilityCandidate> candidates = graph.GetCandidates(itemType);
 			List<InventoryCraftabilityCandidate> usableCandidates = null;
-			List<InventoryCraftabilityCandidate> directlyAvailableCandidates = null;
 			foreach (InventoryCraftabilityCandidate candidate in candidates) {
 				cancellationToken.ThrowIfCancellationRequested();
 
@@ -317,12 +320,10 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 					continue;
 
 				(usableCandidates ??= []).Add(candidate);
-				if (AreRecipeIngredientsDirectlyAvailable(candidate.Recipe, ledger))
-					(directlyAvailableCandidates ??= []).Add(candidate);
 			}
 
-			IEnumerable<InventoryCraftabilityCandidate> candidateSource = directlyAvailableCandidates ?? usableCandidates ?? [];
-			trace?.Add(depth, $"plan ingredient {DemandPlanningTrace.DescribeItem(itemType)} need={requiredQuantity} candidates={candidates.Count} usable={usableCandidates?.Count ?? 0} directOnly={directlyAvailableCandidates is not null}");
+			IEnumerable<InventoryCraftabilityCandidate> candidateSource = usableCandidates ?? [];
+			trace?.Add(depth, $"plan ingredient {DemandPlanningTrace.DescribeItem(itemType)} need={requiredQuantity} candidates={candidates.Count} usable={usableCandidates?.Count ?? 0}");
 			TraceCandidateFilters(trace, depth, candidates, graph, ledger, allowChildAlternateSameResult);
 
 			bool triedCandidate = false;
@@ -551,6 +552,8 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 				bool anyRecipes = false;
 				foreach (Recipe recipe in EnumerateGraphGuidedRecipes(ingredient, graph, available, requiredItem.type, cancellationToken)) {
 					cancellationToken.ThrowIfCancellationRequested();
+					if (recursionStack.Contains(recipe.RecipeIndex))
+						continue;
 
 					anyRecipes = true;
 					int batches = (int)Math.Ceiling(remainingQuantity / (double)recipe.createItem.stack);
@@ -799,7 +802,7 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 					return false;
 
 				bool addedToStack = recursionStack.Add(recipe.RecipeIndex);
-				if (!addedToStack && !isCyclic)
+				if (!addedToStack)
 					return false;
 				if (addedToStack)
 					recursionFingerprint ^= GetRecursionStackEntryHash(recipe.RecipeIndex);

@@ -144,8 +144,8 @@ namespace MagicStorage {
 			}
 		}
 
-		private static void SortAndFilter(RefreshThread thread) {
-			PopulateItems(thread, attempt: 0);
+		private static void SortAndFilter(RefreshThread thread, List<Item> destinationItems, ConditionalWeakTable<Item, List<Item>> destinationGroups) {
+			PopulateItems(thread, destinationItems, destinationGroups, attempt: 0);
 			
 			bool didDefault = false;
 			ref string errorText = ref thread.searchBarError;
@@ -153,7 +153,7 @@ namespace MagicStorage {
 			// now if nothing found we disable filters one by one
 			if (thread.controls.fullSearchText.Trim().Length > 0)
 			{
-				if (items.Count == 0 && thread.controls.filteringOption != FilteringOptionLoader.Definitions.All.Type)
+				if (destinationItems.Count == 0 && thread.controls.filteringOption != FilteringOptionLoader.Definitions.All.Type)
 				{
 					NetHelper.Report(true, "No items passed the filter.  Attempting filter with All setting");
 
@@ -164,17 +164,17 @@ namespace MagicStorage {
 
 					string error = Language.GetTextValue("Mods.MagicStorage.Warnings.StorageDefaultToAllItems");
 
-					if (errorText.Length > 0)
+					if (!string.IsNullOrEmpty(errorText))
 						errorText += $"\n{error}";
 					else
 						errorText = error;
 
 					didDefault = true;
 
-					PopulateItems(thread, attempt: 1);
+					PopulateItems(thread, destinationItems, destinationGroups, attempt: 1);
 				}
 
-				if (items.Count == 0 && thread.controls.modSearchOption != ModSearchBox.ModIndexAll)
+				if (destinationItems.Count == 0 && thread.controls.modSearchOption != ModSearchBox.ModIndexAll)
 				{
 					NetHelper.Report(true, "No items passed the filter.  Attempting filter with All Mods setting");
 
@@ -185,14 +185,14 @@ namespace MagicStorage {
 
 					string error = Language.GetTextValue("Mods.MagicStorage.Warnings.StorageDefaultToAllMods");
 
-					if (errorText.Length > 0)
+					if (!string.IsNullOrEmpty(errorText))
 						errorText += $"\n{error}";
 					else
 						errorText = error;
 
 					didDefault = true;
 
-					PopulateItems(thread, attempt: 2);
+					PopulateItems(thread, destinationItems, destinationGroups, attempt: 2);
 				}
 			}
 
@@ -202,7 +202,7 @@ namespace MagicStorage {
 
 		internal const int RECENT_FILTER_ITEM_COUNT = 100;
 
-		private static void PopulateItems(RefreshThread thread, int attempt) {
+		private static void PopulateItems(RefreshThread thread, List<Item> destinationItems, ConditionalWeakTable<Item, List<Item>> destinationGroups, int attempt) {
 			List<Item> resultItems;
 
 			if (thread.controls.filteringOption == FilteringOptionLoader.Definitions.Recent.Type) {
@@ -222,16 +222,16 @@ namespace MagicStorage {
 			} else
 				resultItems = ItemSorter.SortAndFilterItems(thread, attempt);
 
-			items.Clear();
-			itemToSourceItems.Clear();
+			destinationItems.Clear();
+			destinationGroups.Clear();
 
 			// SortAndFilterItems would have already filtered the favorites out
 			// Also, a partitioning method like OrderFavoritesFirst performs better than OrderByDescending
-			items.AddRange(resultItems);
+			destinationItems.AddRange(resultItems);
 
-			thread.aggregateResults.CopyResultGroupsTo(itemToSourceItems);
+			thread.aggregateResults.MoveResultGroupsTo(destinationGroups);
 
-			NetHelper.Report(true, "Filtering applied.  Item count: " + items.Count);
+			NetHelper.Report(true, "Filtering applied.  Item count: " + destinationItems.Count);
 		}
 	}
 }

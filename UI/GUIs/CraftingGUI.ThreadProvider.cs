@@ -18,7 +18,8 @@ namespace MagicStorage {
 			public SelectionProvider(Recipe defaultValue) => Value = defaultValue;
 			public void ClearStatic() { }
 			public void CopyFromStatic() => Value = selectedRecipe;
-			public void CopyToStatic() => selectedRecipe = Value;
+			// Recipe selection is UI-owned.  A completed refresh must not restore an older captured selection.
+			public void CopyToStatic() { }
 		}
 
 		internal class CraftAmountTargetProvider : IValueProvider<int> {

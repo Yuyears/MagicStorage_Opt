@@ -41,7 +41,6 @@ namespace MagicStorage {
 		private static readonly Dictionary<Recipe, bool> recipeListExactAvailabilityCache = new(ReferenceEqualityComparer.Instance);
 		private static readonly Dictionary<Recipe, Condition[]> recipeListConditionWatchLookup = new(ReferenceEqualityComparer.Instance);
 		private static readonly object recipeListConditionWatchLock = new();
-		private const int RecipeAvailabilityParallelismLimit = 8;
 
 		private static void RefreshRecipes<T>(T thread)
 			where T : RefreshThread, IProcessedStorageItemsProvider, IMainZoneFilterControlsProvider<Recipe>, IMainZoneObjectResultsProvider<Recipe>, IIngredientControlsProvider, ICraftingObjectProvider<Recipe>, ICraftObjectAvailableCacheProvider<Recipe>, IRecipeSimulationsProvider, IRecipeSnapshotsProvider
@@ -246,7 +245,7 @@ namespace MagicStorage {
 		{
 			var results = new (Recipe Recipe, RecipeListAvailabilityResult Availability)[sortedAndFilteredRecipes.Count];
 			var options = new ParallelOptions {
-				MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount - 1, 1, RecipeAvailabilityParallelismLimit)
+				MaxDegreeOfParallelism = RefreshParallelism.ResolveWorkerCount(sortedAndFilteredRecipes.Count)
 			};
 
 			Parallel.For(0, sortedAndFilteredRecipes.Count, options, (index, state) => {
@@ -429,7 +428,9 @@ namespace MagicStorage {
 					taskName: "Sorting Recipes"
 				);
 
-				var sortedObjects = ItemSorter.DoSorting(thread, zip, zip.WrapFunction(static recipe => recipe.createItem));
+				IEnumerable<GenericRecord<Recipe, bool>> sortedObjects = ItemSorter
+					.DoSorting(thread, zip, zip.WrapFunction(static recipe => recipe.createItem))
+					.ThenBy(static entry => entry.Item1.RecipeIndex);
 
 				if (!thread.controls.showOnlyFavorites)
 					sortedObjects = ItemSorter.OrderFavoritesFirst(sortedObjects, zip.WrapFunction(thread.MainZoneObjectsFilterControls.IsFavorited));
@@ -533,7 +534,7 @@ namespace MagicStorage {
 					taskName: "Sorting " + objectNameForTask
 				);
 
-				var sortedObjects = ItemSorter.DoSorting(thread, zip, zip.WrapFunction(getItem));
+				IEnumerable<GenericRecord<T, bool>> sortedObjects = ItemSorter.DoSorting(thread, zip, zip.WrapFunction(getItem));
 
 				if (!thread.controls.showOnlyFavorites)
 					sortedObjects = ItemSorter.OrderFavoritesFirst(sortedObjects, zip.WrapFunction(thread.MainZoneObjectsFilterControls.IsFavorited));

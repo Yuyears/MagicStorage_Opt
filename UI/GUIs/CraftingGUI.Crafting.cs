@@ -199,10 +199,17 @@ namespace MagicStorage {
 			if (Main.netMode == NetmodeID.SinglePlayer) {
 				NetHelper.Report(true, "Handling storage inventory changes and spawning excess results on player...");
 
+				int producedStack = context.results.Sum(static item => item.stack);
+				bool committed;
+				List<Item> excessItems;
 				using (SecuritySystem.CreateAccessContext()) {
-					foreach (Item item in HandleCraftWithdrawAndDeposit(heart, context.toWithdraw, context.results))
+					committed = TryHandleCraftWithdrawAndDeposit(heart, context.toWithdraw, [], [], context.results, out excessItems);
+					foreach (Item item in excessItems)
 						Main.LocalPlayer.QuickSpawnItem(new EntitySource_TileEntity(heart), item, item.stack);
 				}
+
+				int excessStack = excessItems.Sum(static item => item.stack);
+				MagicStorageMod.Instance.Logger.Info($"Single-player craft recipe={selectedRecipe.RecipeIndex} ({Lang.GetItemNameValue(selectedRecipe.createItem.type)}), requested={toCraft}, committed={committed}, produced={producedStack}, deposited={(committed ? producedStack - excessStack : 0)}, excess={excessStack}");
 
 				RequestRefreshAfterCraft(context);
 				return true;
@@ -312,8 +319,15 @@ namespace MagicStorage {
 						await ServerCraftingWorkerSlots.WaitAsync(request.CancellationToken).ConfigureAwait(false);
 						try {
 							CraftingSimulation simulation = new();
-							using (MagicStorageConfig.OverrideRecursionDepth(request.RecursionDepth))
-								simulation.SimulateCrafts(recursiveRecipe, context.toCraft, context.availableRecipeObjects, cancellationToken: request.CancellationToken);
+							using (MagicStorageConfig.OverrideRecursionDepth(request.RecursionDepth)) {
+								InventoryCraftabilityGraph graph = InventoryCraftabilityGraph.Build(
+									context.availableRecipeObjects,
+									MagicCache.EnabledRecipes,
+									GetInventoryCraftabilityGraphDepth(),
+									request.CancellationToken);
+								if (!simulation.TryPlanCraftsWithGraph(recursiveRecipe, context.toCraft, context.availableRecipeObjects, graph, cancellationToken: request.CancellationToken))
+									simulation.SimulateCrafts(recursiveRecipe, context.toCraft, context.availableRecipeObjects, cancellationToken: request.CancellationToken);
+							}
 							double planningMs = Stopwatch.GetElapsedTime(planningStart).TotalMilliseconds;
 							QueueServerCraftCompletion(request, () => CompleteServerCraftOnMainThread(request, context, queueMs, snapshotMs, planningMs, simulation));
 						} finally {
@@ -378,7 +392,9 @@ namespace MagicStorage {
 			double commitMs = Stopwatch.GetElapsedTime(commitStart).TotalMilliseconds;
 			if (!accepted && request.RejectionReason == CraftRejectionReason.None)
 				request.RejectionReason = CraftRejectionReason.StateChanged;
-			MagicStorageMod.Instance.Logger.Info($"Server craft operation={request.OperationId}, recipe={request.Recipe.RecipeIndex} ({Lang.GetItemNameValue(request.Recipe.createItem.type)}), requested={request.RequestedAmount}, recursionDepth={request.RecursionDepth}, accepted={(accepted ? request.RequestedAmount : 0)}, reason={(accepted ? CraftRejectionReason.None : request.RejectionReason)}, inventory={request.InventoryFingerprint:X8}: queue={queueMs:F1}ms, snapshot={snapshotMs:F1}ms, planning={planningMs:F1}ms, commit={commitMs:F1}ms, total={Stopwatch.GetElapsedTime(request.QueuedAt).TotalMilliseconds:F1}ms");
+			int producedStack = producedItems.Sum(static item => item.stack);
+			int excessStack = excessItems.Sum(static item => item.stack);
+			MagicStorageMod.Instance.Logger.Info($"Server craft operation={request.OperationId}, recipe={request.Recipe.RecipeIndex} ({Lang.GetItemNameValue(request.Recipe.createItem.type)}), requested={request.RequestedAmount}, recursionDepth={request.RecursionDepth}, accepted={(accepted ? request.RequestedAmount : 0)}, reason={(accepted ? CraftRejectionReason.None : request.RejectionReason)}, inventory={request.InventoryFingerprint:X8}, produced={producedStack}, deposited={producedStack - excessStack}, excess={excessStack}: queue={queueMs:F1}ms, snapshot={snapshotMs:F1}ms, planning={planningMs:F1}ms, commit={commitMs:F1}ms, total={Stopwatch.GetElapsedTime(request.QueuedAt).TotalMilliseconds:F1}ms");
 			FinishServerCraft(request, accepted, excessItems, producedItems, consumedItems);
 		}
 

@@ -103,7 +103,8 @@ namespace MagicStorage.Components
 
 		public override void KillTile(int i, int j, ref bool fail, ref bool effectOnly, ref bool noItem)
 		{
-			if (fail || effectOnly)
+			// tML uses noItem for internal multi-tile cleanup after the original tile was mined.
+			if (!ShouldCheckDestroyPermission(fail, effectOnly, noItem))
 				return;
 
 			AdjustToTopLeft(ref i, ref j);
@@ -116,6 +117,9 @@ namespace MagicStorage.Components
 				noItem = true;
 			}
 		}
+
+		internal static bool ShouldCheckDestroyPermission(bool fail, bool effectOnly, bool noItem)
+			=> !fail && !effectOnly && !noItem;
 
 		public override void KillMultiTile(int i, int j, int frameX, int frameY)
 		{

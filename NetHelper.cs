@@ -504,15 +504,23 @@ namespace MagicStorage
 			if (Main.netMode == NetmodeID.Server)
 				return;
 
-			if (position.ResolveToTileEntity() is TEStorageHeart heart && StoragePlayer.IsClientViewingHeart(heart) && heart.AcceptNetworkRevision(revision)) {
+			if (position.ResolveToTileEntity() is TEStorageHeart heart && StoragePlayer.IsClientViewingHeart(heart)) {
+				bool accepted = heart.AcceptNetworkRevision(revision);
+				MagicStorageMod.Instance.Logger.Info($"Storage refresh notification: heart={position}, incomingRevision={revision}, accepted={accepted}, types={types.Count}, ignoreSpecific={ignoreSpecificRefreshes}");
+				if (!accepted)
+					goto printReport;
+
 				MagicUI.IgnoreSpecificZoneRefreshing = ignoreSpecificRefreshes;
 				MagicUI.SetNextCollectionsToRefresh(types);
-				if (MagicUI.IsDecraftingUIOpen() && (ignoreSpecificRefreshes || types.Contains(DecraftingGUI.selectedItem) || types.Any(DecraftingGUI.IsItemValidForResult)))
+				bool fullRefresh = MagicUI.IsDecraftingUIOpen() && (ignoreSpecificRefreshes || types.Contains(DecraftingGUI.selectedItem) || types.Any(DecraftingGUI.IsItemValidForResult));
+				MagicStorageMod.Instance.Logger.Info($"Storage refresh notification accepted: heart={position}, mode={(fullRefresh ? "full" : "partial")}");
+				if (fullRefresh)
 					MagicUI.RequestFullRefresh();
 				else
 					MagicUI.RequestMainZoneThread();
 			}
 
+		printReport:
 			Report(true, MessageType.RefreshNetworkItems + " packet received by client " + Main.myPlayer);
 		}
 
@@ -545,6 +553,7 @@ namespace MagicStorage
 				&& storageUnit.Inactive != inActive)
 				{
 					storageUnit.Inactive = inActive;
+					heart.NotifyStorageUnitRoutingChanged(storageUnit);
 					storageUnit.UpdateTileFrameWithNetSend();
 					heart.ResetCompactStage();
 					if (inActive)
@@ -834,11 +843,9 @@ namespace MagicStorage
 			for (int i = 0; i < Recipe.numRecipes; i++) {
 				Recipe recipe = Main.recipe[i];
 				unchecked {
-					digest = (digest ^ GetRecipeFingerprint(recipe)) * prime;
+					digest = (digest ^ GetRecipeRouteFingerprint(recipe)) * prime;
 					digest = (digest ^ (uint)i) * prime;
 				}
-				foreach (char character in recipe.Mod?.Name ?? "Terraria")
-					unchecked { digest = (digest ^ character) * prime; }
 			}
 
 			cachedRecipeTableCount = Recipe.numRecipes;
@@ -879,6 +886,16 @@ namespace MagicStorage
 			return hash;
 		}
 
+		internal static ulong GetRecipeRouteFingerprint(Recipe recipe) {
+			const ulong offset = 14695981039346656037UL;
+			const ulong prime = 1099511628211UL;
+			ulong hash = offset;
+			foreach (char character in recipe.Mod?.Name ?? "Terraria")
+				unchecked { hash = (hash ^ character) * prime; }
+			unchecked { hash = (hash ^ (uint)recipe.createItem.type) * prime; }
+			return hash;
+		}
+
 		internal static bool IsValidCraftRequest(int recipeIndex, int requestedAmount, int recursionDepth, int recipeCount)
 			=> recipeIndex >= 0 && recipeIndex < recipeCount
 			&& requestedAmount > 0 && requestedAmount <= Item.CommonMaxStack
@@ -913,8 +930,13 @@ namespace MagicStorage
 				SendCraftOutcome(sender, operationId, position, null, false, 0, CraftRejectionReason.InvalidRequest, [], []);
 				return;
 			}
-			if (recipeCount != Recipe.numRecipes || recipeTableDigest != GetRecipeTableDigest() || GetRecipeFingerprint(Main.recipe[recipeIndex]) != recipeFingerprint) {
-				MagicStorageMod.Instance.Logger.Warn($"Rejected craft operation={operationId}: recipe table/fingerprint mismatch clientCount={recipeCount} serverCount={Recipe.numRecipes} clientDigest={recipeTableDigest:X16} serverDigest={GetRecipeTableDigest():X16}");
+			ulong serverRecipeTableDigest = GetRecipeTableDigest();
+			ulong serverRecipeFingerprint = GetRecipeFingerprint(Main.recipe[recipeIndex]);
+			bool recipeCountMatches = recipeCount == Recipe.numRecipes;
+			bool routeDigestMatches = recipeTableDigest == serverRecipeTableDigest;
+			bool recipeFingerprintMatches = serverRecipeFingerprint == recipeFingerprint;
+			if (!recipeCountMatches || !routeDigestMatches || !recipeFingerprintMatches) {
+				MagicStorageMod.Instance.Logger.Warn($"Rejected craft operation={operationId}: recipe identity mismatch recipe={recipeIndex}, countMatches={recipeCountMatches}, routeMatches={routeDigestMatches}, fingerprintMatches={recipeFingerprintMatches}, clientCount={recipeCount} serverCount={Recipe.numRecipes} clientRoute={recipeTableDigest:X16} serverRoute={serverRecipeTableDigest:X16} clientFingerprint={recipeFingerprint:X16} serverFingerprint={serverRecipeFingerprint:X16}");
 				SendCraftOutcome(sender, operationId, position, null, false, 0, CraftRejectionReason.RecipeMismatch, [], []);
 				return;
 			}

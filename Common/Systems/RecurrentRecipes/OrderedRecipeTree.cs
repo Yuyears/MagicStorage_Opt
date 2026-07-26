@@ -325,7 +325,7 @@ namespace MagicStorage.Common.Systems.RecurrentRecipes {
 
 				if (!excessIndicies.TryGetValue(createItem.type, out int itemIndex)) {
 					excessIndicies[createItem.type] = excessResults.Count;
-					excessResults.Add(new ExcessItemInfo(createItem.type, context.RentCounterFromParent(createItem.stack), createItem.prefix));
+					excessResults.Add(new ExcessItemInfo(createItem.type, context.RentCounterFromParent(recipe.createItem.stack), createItem.prefix));
 				} else
 					excessResults[itemIndex].UpdateStack(createItem.stack);
 

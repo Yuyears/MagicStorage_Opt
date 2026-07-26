@@ -20,7 +20,7 @@ namespace MagicStorage.Sorting
 		/// <see cref="RefreshThread.workingCounter"/> should contain the number of items in the item collection.<br/>
 		/// <see cref="RefreshThread.workingFlag"/> should indicate whether aggregation should be ignored (if <see langword="true"/>, the items will only be ordered by type and prefix).
 		/// <para/>
-		/// <see cref="RefreshThread.aggregateResults"/> will contain the ordered result items before sorting, as well as the item "groups" for both source and result items
+		/// <see cref="RefreshThread.aggregateResults"/> will contain the ordered result items before sorting and their result-item groups.
 		/// </summary>
 		/// <param name="thread">The refresh thread performing the operation.</param>
 		/// <param name="attempt">The current attempt number for the operation (0-based); used to assign the name for the thread's task schedule.</param>
@@ -32,7 +32,9 @@ namespace MagicStorage.Sorting
 				taskName: SortAndFilter_GenerateTaskName("Filtering", attempt, "Items", listClassification)
 			);
 
-			List<Item> filteredItems = [.. DoFiltering(thread, thread.workingItemList).NotifyStepsTo(thread).WatchForCancellation(thread, 16)];
+			List<Item> filteredItems = thread.Performance.Measure(
+				RefreshPerformancePhase.Filtering,
+				() => (List<Item>)[.. DoFiltering(thread, thread.workingItemList).NotifyStepsTo(thread).WatchForCancellation(thread, 16)]);
 
 			thread.InitTaskSchedule(
 				totalTasks: filteredItems.Count,
@@ -46,20 +48,25 @@ namespace MagicStorage.Sorting
 
 			thread.aggregateResults.ResultCountLimit = takeCount;
 			thread.aggregateResults.IncrementCounterOnResult = false;
+			thread.aggregateResults.RetainSourceGroups = false;
 
+			long aggregationStartedAt = System.Diagnostics.Stopwatch.GetTimestamp();
 			thread.aggregateResults.Aggregate(thread.cancellationToken, thread.workingFlag, ref thread.GetCounterReference());
+			thread.Performance.AddElapsed(RefreshPerformancePhase.Aggregation, aggregationStartedAt);
 
 			thread.InitTaskSchedule(
 				totalTasks: thread.aggregateResults.ResultCount,
 				taskName: SortAndFilter_GenerateTaskName("Sorting", attempt, "Items", listClassification)
 			);
 
-			var sortedItems = DoSorting(thread, thread.aggregateResults.GetResultItems());
+			IEnumerable<Item> sortedItems = DoSorting(thread, thread.aggregateResults.GetResultItems());
 
 			if (!thread.controls.showOnlyFavorites)
 				sortedItems = OrderFavoritesFirst(sortedItems, item => item.favorited);
 
-			return [.. sortedItems.NotifyStepsTo(thread).WatchForCancellation(thread, 16)];
+			return thread.Performance.Measure(
+				RefreshPerformancePhase.Sorting,
+				() => (List<Item>)[.. sortedItems.NotifyStepsTo(thread).WatchForCancellation(thread, 16)]);
 		}
 
 		public static IEnumerable<T> OrderFavoritesFirst<T>(IEnumerable<T> source, Func<T, bool> isFavorited) {
@@ -122,15 +129,15 @@ namespace MagicStorage.Sorting
 			return new ThreadFilterRecipeEnumerator(thread, source, provider);
 		}
 
-		public static IEnumerable<T> DoSorting<T>(RefreshThread thread, IEnumerable<T> source, Func<T, Item> objToItem) {
+		public static IOrderedEnumerable<T> DoSorting<T>(RefreshThread thread, IEnumerable<T> source, Func<T, Item> objToItem) {
 			return new ThreadSortOrderedGenericEnumerable<T>(thread, source, objToItem);
 		}
 
-		public static IEnumerable<Item> DoSorting(RefreshThread thread, IEnumerable<Item> source) {
+		public static IOrderedEnumerable<Item> DoSorting(RefreshThread thread, IEnumerable<Item> source) {
 			return new ThreadSortOrderedItemEnumerable(thread, source);
 		}
 
-		public static IEnumerable<Recipe> DoSorting(RefreshThread thread, IEnumerable<Recipe> source) {
+		public static IOrderedEnumerable<Recipe> DoSorting(RefreshThread thread, IEnumerable<Recipe> source) {
 			return new ThreadSortOrderedRecipeEnumerable(thread, source);
 		}
 
@@ -185,7 +192,7 @@ namespace MagicStorage.Sorting
 				taskName: SortAndFilter_GenerateTaskName("Sorting", attempt, "Recipes", listClassification)
 			);
 
-			var sortedRecipes = DoSorting(thread, filteredRecipes);
+			IEnumerable<Recipe> sortedRecipes = DoSorting(thread, filteredRecipes).ThenBy(static recipe => recipe.RecipeIndex);
 
 			if (provider is not null && !thread.controls.showOnlyFavorites)
 				sortedRecipes = OrderFavoritesFirst(sortedRecipes, provider.IsFavorited);
@@ -238,7 +245,7 @@ namespace MagicStorage.Sorting
 				taskName: SortAndFilter_GenerateTaskName("Sorting", attempt, "Shimmerable Items", listClassification)
 			);
 
-			var sortedItems = DoSorting(thread, filteredItems, Utility.GetItemSample);
+			IEnumerable<int> sortedItems = DoSorting(thread, filteredItems, Utility.GetItemSample);
 
 			if (provider is not null && !thread.controls.showOnlyFavorites)
 				sortedItems = OrderFavoritesFirst(sortedItems, provider.IsFavorited);

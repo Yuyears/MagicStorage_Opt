@@ -56,8 +56,6 @@ namespace MagicStorage {
 			}
 
 			protected override void CollectObjects() {
-				CraftingGUI.hasCompleteData = false;
-
 				var sandbox = new EnvironmentSandbox(Main.LocalPlayer, base.Heart);
 
 				StorageItems.CollectObjects(this);
@@ -77,7 +75,13 @@ namespace MagicStorage {
 			protected override void Execute() {
 				DecraftingGUI.SortAndFilter(this);
 
+				EnsureStorageSnapshotIsCurrent();
 				InitTaskSchedule(6, "Updating Caches");
+			}
+
+			protected override void Cleanup() {
+				if (!HasSuccessfulCompletion)
+					return;
 
 				ProcessedStorageItems.CopyToStaticCollectionsAndFields();
 				CompleteOne();
@@ -94,19 +98,11 @@ namespace MagicStorage {
 
 				StorageGUI.hasAnyErrorItems = base.foundErrorItem;
 				MagicUI.lastKnownSearchBarErrorReason = base.searchBarError;
-
 				CraftingGUI.hasCompleteData = true;
 			}
 
-			protected override void Cleanup() { }
-
 			public override void ClearStaticCollections() {
-				ProcessedStorageItems.ClearStaticCollections();
-				MainZoneObjectsResults.ClearStaticCollections();
-				IngredientControls.ClearStaticCollections();
-				ShimmerItemReports.ClearStaticCollection();
-				RecipeItems.ClearStaticCollections();
-				StorageGUI.hasAnyErrorItems = false;
+				// Keep the last complete view while the replacement snapshot is validated.
 			}
 
 			// Unused due to being a full thread
@@ -146,8 +142,6 @@ namespace MagicStorage {
 			}
 
 			protected override void CollectObjects() {
-				CraftingGUI.hasCompleteData = false;
-
 				var sandbox = new EnvironmentSandbox(Main.LocalPlayer, base.Heart);
 
 				ProcessedStorageItems.CopyFromStaticCollectionsAndFields();
@@ -166,6 +160,11 @@ namespace MagicStorage {
 				DecraftingGUI.RefreshItemsAvailability(this);
 
 				InitTaskSchedule(3, "Updating Caches");
+			}
+
+			protected override void Cleanup() {
+				if (!HasSuccessfulCompletion)
+					return;
 
 				ProcessedStorageItems.CopyToStaticCollectionsAndFields();
 				CompleteOne();
@@ -175,16 +174,11 @@ namespace MagicStorage {
 				CompleteOne();
 
 				MagicUI.lastKnownSearchBarErrorReason = base.searchBarError;
-				
 				CraftingGUI.hasCompleteData = true;
 			}
 
-			protected override void Cleanup() { }
-
 			public override void ClearStaticCollections() {
-				ProcessedStorageItems.ClearStaticCollections();
-				MainZoneObjectsResults.ClearStaticCollections();
-				IngredientControls.ClearStaticCollections();
+				// Keep the last complete view while the replacement snapshot is validated.
 			}
 
 			public override void PrepareUIZones() => refreshingUI.GetDefaultPage().OnRefreshStart();
@@ -226,8 +220,6 @@ namespace MagicStorage {
 			}
 
 			protected override void CollectObjects() {
-				CraftingGUI.hasCompleteData = false;
-
 				ProcessedStorageItems.CopyFromStaticCollectionsAndFields();
 				IngredientControls.CollectObjects(this);
 				ShimmerItemReports.CollectObjects(CraftingObject.selection.Value);
@@ -237,6 +229,11 @@ namespace MagicStorage {
 				DecraftingGUI.RefreshStorageItems(this);
 
 				InitTaskSchedule(4, "Updating Caches");
+			}
+
+			protected override void Cleanup() {
+				if (!HasSuccessfulCompletion)
+					return;
 
 				IngredientControls.CopyToStaticCollectionsAndFields();
 				CompleteOne();
@@ -246,16 +243,11 @@ namespace MagicStorage {
 				CompleteOne();
 				RecipeItems.CopyToStaticCollections();
 				CompleteOne();
-				
 				CraftingGUI.hasCompleteData = true;
 			}
 
-			protected override void Cleanup() { }
-
 			public override void ClearStaticCollections() {
-				IngredientControls.ClearStaticCollections();
-				ShimmerItemReports.ClearStaticCollection();
-				RecipeItems.ClearStaticCollections();
+				// Keep the last complete view while the replacement snapshot is validated.
 			}
 
 			public override void PrepareUIZones() {

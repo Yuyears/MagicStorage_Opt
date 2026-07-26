@@ -38,10 +38,14 @@ namespace MagicStorage.Components
 			private readonly TEStorageCenter _center;
 			private Point16 _foundHeart;
 			private readonly HashSet<int> _unresolvedComponents = [];
+			private readonly List<TEAbstractStorageUnit> _storageUnitEntities = [];
+			private bool _storageUnitEntitiesDirty = true;
+			private long _topologyRevision;
 
 			private readonly Dictionary<ComponentType, HashSet<Point16>> _knownComponentLocationCache = new();
 
 			public int Count => _components.Count;
+			internal long TopologyRevision => _topologyRevision;
 
 			public Point16 StorageCenter => _center.Position;
 
@@ -55,6 +59,9 @@ namespace MagicStorage.Components
 				_components.Clear();
 				_knownComponentLocationCache.Clear();
 				_unresolvedComponents.Clear();
+				_storageUnitEntities.Clear();
+				_storageUnitEntitiesDirty = true;
+				_topologyRevision++;
 				
 				if (_center is not TEStorageHeart)
 					_foundHeart = Point16.NegativeOne;
@@ -108,6 +115,8 @@ namespace MagicStorage.Components
 				
 				if (set.Add(component.Position)) {
 					_components.Add(new Component(component.Position, type));
+					_storageUnitEntitiesDirty = true;
+					_topologyRevision++;
 					_center.OnConnectComponent(component);
 				}
 
@@ -182,13 +191,21 @@ namespace MagicStorage.Components
 			}
 
 			private void UnlinkAtIndex(int i) {
-				if (_components[i].location.ResolveToTileEntity() is TEStorageComponent storageComponent) {
+				Component removed = _components[i];
+				if (removed.location.ResolveToTileEntity() is TEStorageComponent storageComponent) {
 					storageComponent.Unlink();
 					_center.OnDisconnectComponent(storageComponent);
 					NetHelper.SendTEUpdate(storageComponent.ID, storageComponent.Position);
 				}
 
 				_components.RemoveAt(i);
+				if (_knownComponentLocationCache.TryGetValue(removed.type, out HashSet<Point16> knownLocations)) {
+					knownLocations.Remove(removed.location);
+					if (knownLocations.Count == 0)
+						_knownComponentLocationCache.Remove(removed.type);
+				}
+				_storageUnitEntitiesDirty = true;
+				_topologyRevision++;
 
 				MarkIndexAsResolved(i);
 			}
@@ -272,7 +289,16 @@ namespace MagicStorage.Components
 
 			public IEnumerable<Point16> GetStorageUnits() => ResolveComponents().Where(static c => c.type == ComponentType.StorageUnit).Select(static c => c.location);
 
-			public IEnumerable<TEAbstractStorageUnit> GetStorageUnitEntities() => GetStorageUnits().ResolveTileEntities<TEAbstractStorageUnit>();
+			public IReadOnlyList<TEAbstractStorageUnit> GetStorageUnitEntities() {
+				ResolveComponents();
+				if (_storageUnitEntitiesDirty) {
+					_storageUnitEntities.Clear();
+					_storageUnitEntities.AddRange(GetStorageUnits().ResolveTileEntities<TEAbstractStorageUnit>());
+					_storageUnitEntitiesDirty = false;
+				}
+
+				return _storageUnitEntities;
+			}
 
 			public IEnumerable<TEStorageUnit> GetRealStorageUnitEntities() => GetStorageUnits().ResolveTileEntities<TEStorageUnit>();
 

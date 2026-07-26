@@ -56,6 +56,9 @@ namespace MagicStorage.Components
 		private HashSet<ItemData> hasSpaceInStack = new();
 		internal List<Item> items = new();  //Exposed to make "selling" items easier
 		internal bool receiving;
+		private IReadOnlyList<Item> itemSnapshot = Array.Empty<Item>();
+		private bool hasItemSnapshot;
+		private long contentRevision;
 
 		public int Capacity
 		{
@@ -117,6 +120,31 @@ namespace MagicStorage.Components
 		}
 
 		public override IEnumerable<Item> GetItems() => items;
+
+		internal override StorageUnitSnapshot GetItemSnapshot() {
+			if (!hasItemSnapshot)
+				PublishItemSnapshot(notifyHeart: false);
+
+			return new(Position, contentRevision, itemSnapshot);
+		}
+
+		internal static Item[] CloneItemsForSnapshot(IReadOnlyList<Item> source) {
+			Item[] snapshot = new Item[source.Count];
+			for (int i = 0; i < source.Count; i++)
+				snapshot[i] = source[i].Clone();
+			return snapshot;
+		}
+
+		private void PublishItemSnapshot(bool notifyHeart = true) {
+			IReadOnlyList<Item> previousSnapshot = itemSnapshot;
+			Item[] snapshot = CloneItemsForSnapshot(items);
+
+			itemSnapshot = snapshot;
+			hasItemSnapshot = true;
+			contentRevision++;
+			if (notifyHeart)
+				GetHeart()?.NotifyStorageUnitChanged(Position, previousSnapshot, snapshot);
+		}
 
 		public override void DepositItem(Item toDeposit)
 		{
@@ -569,6 +597,7 @@ namespace MagicStorage.Components
 				hasItem.Add(data);
 				hasItemNoPrefix.Add(data.Type);
 			}
+			PublishItemSnapshot(notifyHeart: false);
 		}
 
 		public void FullySync()
@@ -671,13 +700,16 @@ namespace MagicStorage.Components
 			int opCount = bitReader.ReadUInt16(NetCompression.GetBitSize(MAX_REQUESTS));
 			if (opCount > 0)
 			{
+				TEStorageUnit snapshotOwner = this;
 				if (ByPosition.TryGetValue(Position, out TileEntity te) && te is TEStorageUnit otherUnit)
 				{
 					items = otherUnit.items;
 					hasSpaceInStack = otherUnit.hasSpaceInStack;
 					hasItem = otherUnit.hasItem;
 					hasItemNoPrefix = otherUnit.hasItemNoPrefix;
+					snapshotOwner = otherUnit;
 				}
+				long revisionBeforeOperations = snapshotOwner.contentRevision;
 
 				int oldCount = items.Count;
 
@@ -743,10 +775,15 @@ namespace MagicStorage.Components
 				if (repairMetaData)
 					RepairMetadata();
 
+				if (snapshotOwner.contentRevision == revisionBeforeOperations)
+					snapshotOwner.PublishItemSnapshot();
+
 				if (items.Count != oldCount)
-					UpdateTileFrameWithNetSend();
+					snapshotOwner.UpdateTileFrameWithNetSend();
 
 				receiving = false;
+				StorageUnitSnapshot snapshot = snapshotOwner.GetItemSnapshot();
+				MagicStorageMod.Instance.Logger.Info($"Storage unit sync: position={Position}, operations={opCount}, serverSlots={serverItemsCount}, liveSlots={items.Count}, liveQuantity={GetTotalQuantity(items)}, snapshotRevision={snapshot.Revision}, snapshotQuantity={GetTotalQuantity(snapshot.Items)}");
 
 				NetHelper.Report(true, "Received tile entity data for TEStorageUnit");
 			}
@@ -762,6 +799,14 @@ namespace MagicStorage.Components
 		internal void RetryFullSyncIfNeeded() {
 			if (Main.netMode == NetmodeID.MultiplayerClient && fullSyncRequired)
 				NetHelper.SyncStorageUnit(Position);
+		}
+
+		private static long GetTotalQuantity(IEnumerable<Item> source) {
+			long quantity = 0;
+			foreach (Item item in source)
+				if (!item.IsAir)
+					quantity += item.stack;
+			return quantity;
 		}
 
 		private void ClearItemsData()
@@ -789,8 +834,10 @@ namespace MagicStorage.Components
 
 		public void PostChangeContents()
 		{
-			RepairMetadata();
-			UpdateTileFrameWithNetSend();
+			TEStorageUnit owner = ByPosition.TryGetValue(Position, out TileEntity te) && te is TEStorageUnit otherUnit ? otherUnit : this;
+			owner.RepairMetadata();
+			owner.PublishItemSnapshot();
+			owner.UpdateTileFrameWithNetSend();
 			NetHelper.SendTEUpdate(ID, Position);
 		}
 	}

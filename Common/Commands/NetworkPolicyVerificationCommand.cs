@@ -10,8 +10,10 @@ using Terraria.ModLoader;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using MagicStorage.Common.Systems.Auditing;
 using MagicStorage.Common.Systems.Shimmering;
+using MagicStorage.Common.Threading;
 using MagicStorage.Common.Threading.Refreshing;
 using MagicStorage.Components;
 using MagicStorage.Sorting;
@@ -122,6 +124,24 @@ namespace MagicStorage.Common.Commands {
 			Require(MagicStorageConfig.RecipeRecursionDepth == configuredRecursionDepth, "Request recursion override leaked after disposal.");
 			Require(CraftingGUI.MaxQueuedServerCrafts > 0 && CraftingGUI.MaxQueuedServerCrafts <= 32, "Server craft queue limit is invalid.");
 			Require(CraftingGUI.ServerCraftingWorkerCount > 0 && CraftingGUI.ServerCraftingWorkerCount <= 8, "Server craft worker limit is invalid.");
+			Require(RefreshParallelism.WorkerCount > 0 && RefreshParallelism.WorkerCount <= RefreshParallelism.DefaultWorkerCount && RefreshParallelism.MaxWorkerCount == 8, "Refresh worker bounds are invalid.");
+			List<Item> countInput = [new Item(ItemID.Wood, 2), new Item(ItemID.Wood, 5) { prefix = 1 }, new Item(ItemID.StoneBlock, 3)];
+			Dictionary<int, int> singleCounts = [], parallelCounts = [];
+			Dictionary<int, Dictionary<int, int>> singlePrefixes = [], parallelPrefixes = [];
+			CraftingGUI.BuildItemCounts(countInput, [], singleCounts, singlePrefixes, 1, minimumParallelWorkItems: 0);
+			CraftingGUI.BuildItemCounts(countInput, [], parallelCounts, parallelPrefixes, 8, minimumParallelWorkItems: 0);
+			Require(singleCounts.Count == parallelCounts.Count && singleCounts.All(pair => parallelCounts.GetValueOrDefault(pair.Key) == pair.Value), "Parallel item counting changed type totals.");
+			Require(parallelCounts.GetValueOrDefault(ItemID.Wood) == 7 && parallelPrefixes[ItemID.Wood].GetValueOrDefault(0) == 2 && parallelPrefixes[ItemID.Wood].GetValueOrDefault(1) == 5, "Parallel item counting changed prefix totals.");
+			ItemAggregateResults singleItemAggregate = new([new Item(ItemID.Wood)]);
+			int aggregateProgress = 0;
+			singleItemAggregate.Aggregate(default, uniqueSlotPerItemStack: false, ref aggregateProgress);
+			Require(singleItemAggregate.SourceCount == 1, "Item aggregation omitted the first source stack.");
+			ItemAggregateResults compactAggregate = new([new Item(ItemID.Wood, 2), new Item(ItemID.Wood, 3)]) { RetainSourceGroups = false };
+			compactAggregate.Aggregate(default, uniqueSlotPerItemStack: false, ref aggregateProgress);
+			List<List<Item>> movedAggregateGroups = [];
+			compactAggregate.MoveResultGroupsTo(movedAggregateGroups);
+			Require(compactAggregate.SourceCount == 2 && !compactAggregate.GetSourceGroups().Any() && movedAggregateGroups.Count == 1 && movedAggregateGroups[0].Count == 1 && movedAggregateGroups[0][0].stack == 5, "Compact aggregation changed result groups or retained source groups.");
+			Require(compactAggregate.GetResultItems().Single().stack == 5 && !compactAggregate.GetResultItemGroups().Any(), "Moving aggregation result groups changed result items or retained moved groups.");
 			Require(TEStorageHeart.NetworkOperationTimeoutMilliseconds > 800, "Network operation timeout does not tolerate 800ms latency.");
 			Require(TEStorageHeart.CraftOperationTimeoutMilliseconds > TEStorageHeart.NetworkOperationTimeoutMilliseconds, "Long-running server crafts use the ordinary storage timeout.");
 			Require(TEStorageHeart.NetworkWarningCooldownMilliseconds >= TEStorageHeart.NetworkOperationTimeoutMilliseconds, "Network warning cooldown is shorter than the operation timeout.");
@@ -131,6 +151,31 @@ namespace MagicStorage.Common.Commands {
 			Require(TEStorageHeart.IsNetworkOperationTimedOut(0, timeoutTicks), "The configured operation timeout boundary was not enforced.");
 			Require(TEStorageHeart.ShouldAcceptNetworkRevision(10, 10) && TEStorageHeart.ShouldAcceptNetworkRevision(10, 11), "Current or newer network revisions were rejected.");
 			Require(!TEStorageHeart.ShouldAcceptNetworkRevision(10, 9), "An older network revision was accepted.");
+			Require(TEStorageHeart.IsStorageSnapshotCurrent(4, 8, 4, 8), "An unchanged storage snapshot was rejected.");
+			Require(!TEStorageHeart.IsStorageSnapshotCurrent(4, 8, 5, 8) && !TEStorageHeart.IsStorageSnapshotCurrent(4, 8, 4, 9), "A changed storage snapshot was accepted.");
+			List<Item> liveItems = [new Item(ItemID.Wood, 5)];
+			Item[] immutableSnapshot = TEStorageUnit.CloneItemsForSnapshot(liveItems);
+			liveItems[0].stack = 1;
+			Require(immutableSnapshot.Length == 1 && immutableSnapshot[0].stack == 5 && !ReferenceEquals(liveItems[0], immutableSnapshot[0]), "Storage snapshot retained a mutable live item reference.");
+			TEStorageUnit unitWithUnpublishedContents = new();
+			unitWithUnpublishedContents.items.Add(new Item(ItemID.Wood, 5));
+			StorageUnitSnapshot publishedSnapshot = unitWithUnpublishedContents.GetItemSnapshot();
+			Require(publishedSnapshot.Items.Count == 1 && publishedSnapshot.Items[0].stack == 5 && !ReferenceEquals(unitWithUnpublishedContents.items[0], publishedSnapshot.Items[0]), "Storage unit did not initialize an immutable snapshot for existing contents.");
+			object firstUnit = new(), indexedUnit = new(), lastUnit = new(), staleUnit = new();
+			List<object> allUnits = [firstUnit, indexedUnit, lastUnit];
+			List<object> routedUnits = [.. TEStorageHeart.EnumerateIndexedCandidatesWithFallback([indexedUnit, staleUnit, indexedUnit], allUnits, new HashSet<object>(allUnits))];
+			Require(routedUnits.Count == 3 && ReferenceEquals(routedUnits[0], indexedUnit) && ReferenceEquals(routedUnits[1], firstUnit) && ReferenceEquals(routedUnits[2], lastUnit), "Storage routing candidates did not preserve indexed priority, fallback order, de-duplication, and stale-reference rejection.");
+			object compactFirst = new(), compactSecond = new(), compactThird = new();
+			List<(int Index, object Unit)> compactDestinations = [(0, compactFirst), (2, compactSecond), (4, compactThird)];
+			List<(int Index, object Unit)> compactSources = [(0, compactFirst), (1, new object()), (2, compactSecond), (3, new object()), (4, compactThird)];
+			List<(object Destination, object Source)> compactPairs = [.. TEStorageHeart.EnumerateOrderedCompactionCandidates(compactDestinations, compactSources)];
+			Require(compactPairs.Count == 6
+				&& ReferenceEquals(compactPairs[0].Destination, compactFirst) && ReferenceEquals(compactPairs[0].Source, compactSources[1].Unit)
+				&& ReferenceEquals(compactPairs[1].Destination, compactFirst) && ReferenceEquals(compactPairs[1].Source, compactSecond)
+				&& ReferenceEquals(compactPairs[2].Destination, compactFirst) && ReferenceEquals(compactPairs[2].Source, compactSources[3].Unit)
+				&& ReferenceEquals(compactPairs[3].Destination, compactFirst) && ReferenceEquals(compactPairs[3].Source, compactThird)
+				&& ReferenceEquals(compactPairs[4].Destination, compactSecond) && ReferenceEquals(compactPairs[4].Source, compactSources[3].Unit)
+				&& ReferenceEquals(compactPairs[5].Destination, compactSecond) && ReferenceEquals(compactPairs[5].Source, compactThird), "Compaction candidates changed source ordering or included a unit itself.");
 			TEStorageHeart pendingHeart = new();
 			long pendingCraft = pendingHeart.BeginClientOperation(TEStorageHeart.PendingOperationKind.Craft);
 			Require(pendingHeart.HasPendingOperation(TEStorageHeart.PendingOperationKind.Craft), "Craft operation was not registered as pending.");
@@ -139,6 +184,14 @@ namespace MagicStorage.Common.Commands {
 			List<Item> unfiltered = [new Item(ItemID.DirtBlock)];
 			CraftingGUI.CopyUnfilteredItems(unfiltered, [new Item(ItemID.Wood)], [new Item(ItemID.StoneBlock)]);
 			Require(unfiltered.Count == 2 && unfiltered[0].type == ItemID.Wood && unfiltered[1].type == ItemID.StoneBlock, "Unfiltered crafting inventory omitted storage or module items.");
+			Item firstResultStack = new(ItemID.Wood, 3);
+			Item aggregatedResult = CraftingGUI.AggregateCompatibleResultItem(null, firstResultStack);
+			aggregatedResult = CraftingGUI.AggregateCompatibleResultItem(aggregatedResult, new Item(ItemID.Wood, 4));
+			Require(aggregatedResult.stack == 7 && firstResultStack.stack == 3, "Crafting result total did not aggregate compatible stacks without mutating its source snapshot.");
+			Item prefixedResult = new(ItemID.IronBroadsword) { prefix = 1 };
+			Item incompatibleResult = new(ItemID.IronBroadsword) { prefix = 2 };
+			Item retainedResult = CraftingGUI.AggregateCompatibleResultItem(prefixedResult.Clone(), incompatibleResult);
+			Require(retainedResult.stack == 1 && retainedResult.prefix == prefixedResult.prefix, "Crafting result total merged incompatible item variants.");
 			ShimmerItemReports shimmerReports = new([new ItemReport(ItemID.Wood)]);
 			shimmerReports.CopyFromStaticCollection();
 			shimmerReports.ReplaceReports([new ItemReport(ItemID.StoneBlock)]);
@@ -160,9 +213,38 @@ namespace MagicStorage.Common.Commands {
 			repeatedIngredientRecipe.acceptedGroups.Add(RecipeGroupID.Wood);
 			Require(!CraftingGUI.CanReserveRecipeBatches(repeatedIngredientRecipe, new Dictionary<int, int> { [ItemID.BorealWood] = 1 }, [], 1), "Repeated grouped ingredients reused one item stack.");
 			Require(CraftingGUI.CanReserveRecipeBatches(repeatedIngredientRecipe, new Dictionary<int, int> { [ItemID.BorealWood] = 2 }, [], 1), "Repeated grouped ingredients rejected sufficient inventory.");
+			Recipe recursiveQuantityRecipe = new();
+			recursiveQuantityRecipe.createItem.SetDefaults(ItemID.Wood);
+			OrderedRecipeTree recursiveQuantityTree = new(new OrderedRecipeContext(recursiveQuantityRecipe, 0, new SharedCounter(10)), 0);
+			recursiveQuantityTree.GetCraftingInformation(null, out CraftResult recursiveQuantityResult);
+			Require(recursiveQuantityResult.excessResults.Count == 1 && recursiveQuantityResult.excessResults[0].Stack == 10, "Recursive result quantity was multiplied by its batch count twice.");
+			Recipe alternateRoot = new() { RecipeIndex = int.MaxValue - 2 };
+			alternateRoot.createItem.SetDefaults(ItemID.WorkBench);
+			alternateRoot.requiredItem.Add(new Item(ItemID.StoneBlock, 2));
+			Recipe insufficientFirstPath = new() { RecipeIndex = int.MaxValue - 1 };
+			insufficientFirstPath.createItem.SetDefaults(ItemID.StoneBlock);
+			insufficientFirstPath.requiredItem.Add(new Item(ItemID.Wood, 2));
+			Recipe viableSecondPath = new() { RecipeIndex = int.MaxValue };
+			viableSecondPath.createItem.SetDefaults(ItemID.StoneBlock);
+			viableSecondPath.requiredItem.Add(new Item(ItemID.DirtBlock));
+			Recipe competingRoot = new() { RecipeIndex = int.MaxValue - 3 };
+			competingRoot.createItem.SetDefaults(ItemID.WorkBench);
+			competingRoot.requiredItem.Add(new Item(ItemID.DirtBlock));
+			AvailableRecipeObjects alternateInventory = new(new bool[TileLoader.TileCount], new Dictionary<int, int> { [ItemID.Wood] = 2, [ItemID.DirtBlock] = 2 }, null, [], false, static _ => true);
+			InventoryCraftabilityGraph alternateGraph = InventoryCraftabilityGraph.Build(alternateInventory, [alternateRoot, competingRoot, insufficientFirstPath, viableSecondPath], 3);
+			CraftingSimulation alternateSimulation = new();
+			Require(alternateSimulation.TryPlanCraftsWithGraph(new RecursiveRecipe(alternateRoot), 1, alternateInventory, alternateGraph)
+				&& alternateSimulation.CraftOperations.Count(operation => operation.recursionDepth == 0 && ReferenceEquals(operation.recipe, alternateRoot)) == 1
+				&& !alternateSimulation.CraftOperations.Any(operation => ReferenceEquals(operation.recipe, competingRoot))
+				&& alternateSimulation.CraftOperations.Any(operation => ReferenceEquals(operation.recipe, viableSecondPath))
+				&& !alternateSimulation.CraftOperations.Any(operation => ReferenceEquals(operation.recipe, insufficientFirstPath)), "Recursive planner changed the requested root recipe or failed to select a viable child path.");
 			ulong originalFingerprint = NetHelper.GetRecipeFingerprint(repeatedIngredientRecipe);
+			ulong originalRouteFingerprint = NetHelper.GetRecipeRouteFingerprint(repeatedIngredientRecipe);
 			repeatedIngredientRecipe.createItem.stack++;
 			Require(NetHelper.GetRecipeFingerprint(repeatedIngredientRecipe) != originalFingerprint, "Recipe fingerprint ignored recipe identity changes.");
+			Require(NetHelper.GetRecipeRouteFingerprint(repeatedIngredientRecipe) == originalRouteFingerprint, "Recipe route fingerprint changed for a material-only change.");
+			repeatedIngredientRecipe.createItem.type = ItemID.StoneBlock;
+			Require(NetHelper.GetRecipeRouteFingerprint(repeatedIngredientRecipe) != originalRouteFingerprint, "Recipe route fingerprint ignored output identity changes.");
 			Require(NetHelper.GetRecipeTableDigest() == NetHelper.GetRecipeTableDigest(), "Recipe table digest was not stable.");
 			Require(Enum.GetValues<CraftRejectionReason>().Length == 9, "Unexpected craft rejection reason set.");
 			Require(InboundPacketGuard.ResolvePlayer(7, 3, NetmodeID.Server) == 3, "Server trusted a packet player instead of transport sender.");
@@ -190,6 +272,8 @@ namespace MagicStorage.Common.Commands {
 			Require(SecuritySystem.ShouldRetainNetworkAccess(restricted: true, isOwner: true, isOperator: false), "Owner network access was revoked.");
 			Require(SecuritySystem.ShouldRetainNetworkAccess(restricted: true, isOwner: false, isOperator: true), "Operator network access was revoked.");
 			Require(!SecuritySystem.ShouldRetainNetworkAccess(restricted: true, isOwner: false, isOperator: false), "Stale private network access was retained.");
+			Require(StorageComponent.ShouldCheckDestroyPermission(fail: false, effectOnly: false, noItem: false), "Direct tile mining bypassed destroy permission checks.");
+			Require(!StorageComponent.ShouldCheckDestroyPermission(fail: false, effectOnly: false, noItem: true), "Internal multi-tile cleanup was treated as player mining.");
 			Require(NodePool.VerifyParallelIdentityAllocation(), "Parallel recursive node identity allocation produced a duplicate.");
 			InventoryCraftabilityProbeFlags combinedPlannerFlags = InventoryCraftabilityProbeFlags.AlternateSameResultRecipe
 				| InventoryCraftabilityProbeFlags.CyclicDependencyRegion

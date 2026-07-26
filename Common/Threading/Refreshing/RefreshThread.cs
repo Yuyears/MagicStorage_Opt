@@ -5,6 +5,7 @@ using MagicStorage.UI.States;
 using Microsoft.Xna.Framework;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Terraria;
@@ -31,6 +32,8 @@ namespace MagicStorage.Common.Threading.Refreshing {
 		/// A token that can be used to monitor for cancellation requests.
 		/// </summary>
 		public readonly CancellationToken cancellationToken;
+
+		internal RefreshPerformanceMetrics Performance { get; } = new();
 
 		private readonly List<IWaitProvider> _externalWork = [];
 
@@ -76,6 +79,10 @@ namespace MagicStorage.Common.Threading.Refreshing {
 		public TEStorageHeart Heart { get; private set; }
 
 		private bool _hasStarted;
+		private bool _hasStorageSnapshot;
+		private long _storageTopologyRevision;
+		private long _storageContentRevision;
+		private Dictionary<Terraria.DataStructures.Point16, long> _storageUnitRevisions;
 
 		/// <summary>
 		/// Whether this thread is currently running.
@@ -128,6 +135,35 @@ namespace MagicStorage.Common.Threading.Refreshing {
 		/// Sets the debug name for this thread.
 		/// </summary>
 		public void SetDebugName(string name) => _debugName = name;
+
+		internal void CaptureStorageSnapshot(long topologyRevision, long contentRevision, IReadOnlyDictionary<Terraria.DataStructures.Point16, long> unitRevisions) {
+			_hasStorageSnapshot = true;
+			_storageTopologyRevision = topologyRevision;
+			_storageContentRevision = contentRevision;
+			_storageUnitRevisions = new Dictionary<Terraria.DataStructures.Point16, long>(unitRevisions);
+		}
+
+		protected void EnsureStorageSnapshotIsCurrent() {
+			if (_hasStorageSnapshot && !TEStorageHeart.IsStorageSnapshotCurrent(
+				_storageTopologyRevision,
+				_storageContentRevision,
+				Heart.StorageTopologyRevision,
+				Heart.StorageContentRevision))
+				throw new StaleStorageSnapshotException();
+
+			if (!_hasStorageSnapshot)
+				return;
+
+			IReadOnlyList<TEAbstractStorageUnit> units = Heart.GetStorageUnits();
+			if (units.Count != _storageUnitRevisions.Count)
+				throw new StaleStorageSnapshotException();
+
+			foreach (TEAbstractStorageUnit unit in units) {
+				StorageUnitSnapshot snapshot = unit.GetItemSnapshot();
+				if (!_storageUnitRevisions.TryGetValue(snapshot.Position, out long revision) || revision != snapshot.Revision)
+					throw new StaleStorageSnapshotException();
+			}
+		}
 
 		private static readonly SemaphoreSlim _executionGate = new(1, 1);
 		private int _ownsExecutionGate;
@@ -211,7 +247,8 @@ namespace MagicStorage.Common.Threading.Refreshing {
 
 				NetHelper.Report(true, DebugName + ": Starting refreshing thread...");
 
-				CollectObjects();
+				Performance.Begin();
+				Performance.Measure(RefreshPerformancePhase.Collection, CollectObjects);
 
 				new Task(Tick, TaskCreationOptions.LongRunning).Start();
 				taskStarted = true;
@@ -330,6 +367,8 @@ namespace MagicStorage.Common.Threading.Refreshing {
 		/// </summary>
 		public void CompleteOne() => Interlocked.Increment(ref _currentStep);
 
+		internal void Complete(int count) => Interlocked.Add(ref _currentStep, count);
+
 		private void Initialize() {
 			// The prompt is closed if the old thread was cancelled, so make it appear again
 			if (refreshingUI.currentPage is BaseStorageUIAccessPage accessPage)
@@ -363,19 +402,28 @@ namespace MagicStorage.Common.Threading.Refreshing {
 
 		private void Tick() {
 			bool hasError = false;
+			bool staleSnapshot = false;
 
 			try {
 				Initialize();
 
-				Execute();
+				EnsureStorageSnapshotIsCurrent();
+				Performance.Measure(RefreshPerformancePhase.Execution, Execute);
+				EnsureStorageSnapshotIsCurrent();
 				if (cancellationToken.IsCancellationRequested) {
 					NetHelper.Report(true, "Thread work was cancelled");
 					return;
 				}
 
 				HasSuccessfulCompletion = true;
+				if (_hasStorageSnapshot)
+					Heart.AcknowledgeStorageChanges(_storageContentRevision);
 
 				NetHelper.Report(true, "Main work for thread finished");
+			} catch (StaleStorageSnapshotException) {
+				staleSnapshot = true;
+				MagicStorageMod.Instance.Logger.Info($"Storage refresh snapshot became stale ({DebugName}); preserving the last complete UI state and requesting a full refresh.");
+				Main.QueueMainThreadAction(MagicUI.RequestFullRefresh);
 			} catch (Exception ex) when (IsCancellationException(ex)) {
 				NetHelper.Report(true, "Thread work was cancelled");
 			} catch (Exception ex) {
@@ -386,7 +434,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 					Main.NewTextMultiline(Language.GetTextValue("Mods.MagicStorage.RefreshThreadError"), c: Color.Red);
 			} finally {
 				try {
-					Cleanup();
+					Performance.Measure(RefreshPerformancePhase.Publication, Cleanup);
 
 					NetHelper.Report(true, "Cleanup for thread finished");
 
@@ -396,7 +444,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 
 						foreach (var provider in _externalWork)
 							provider.Wait();
-					} else
+					} else if (!staleSnapshot)
 						ClearStaticCollections();
 				} catch (OperationCanceledException) {
 					NetHelper.Report(true, "Thread cleanup was cancelled");
@@ -406,6 +454,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 					if (!hasError && Main.netMode != NetmodeID.Server)
 						Main.NewTextMultiline(Language.GetTextValue("Mods.MagicStorage.RefreshThreadError"), c: Color.Red);
 				} finally {
+					Performance.Report(DebugName, this is IStorageItemsProvider provider ? provider.StorageItems : null, Heart?.NetworkRevision ?? 0, IsPartialThread);
 					AllowNewThreadToExecute();
 					IsRunning = false;
 
@@ -415,7 +464,7 @@ namespace MagicStorage.Common.Threading.Refreshing {
 					if (object.ReferenceEquals(this, MagicUI.activeRefreshingThread))
 						MagicUI.activeRefreshingThread = null;
 
-					if (!cancellationToken.IsCancellationRequested) {
+					if (HasSuccessfulCompletion && !cancellationToken.IsCancellationRequested) {
 						// Ensure that race conditions with the UI can't occur
 						// QueueMainThreadAction will execute the logic in a very specific place
 						if (IsPartialThread)
@@ -483,5 +532,70 @@ namespace MagicStorage.Common.Threading.Refreshing {
 		/// This method is only invoked if <see cref="IsPartialThread"/> is <see langword="true"/>.
 		/// </summary>
 		public abstract void PopulateUIZones();
+	}
+
+	internal enum RefreshPerformancePhase {
+		Collection,
+		Topology,
+		Snapshot,
+		Filtering,
+		Aggregation,
+		Sorting,
+		Counting,
+		Execution,
+		Publication
+	}
+
+	internal sealed class StaleStorageSnapshotException : Exception { }
+
+	internal sealed class RefreshPerformanceMetrics {
+		private readonly long[] _ticks = new long[Enum.GetValues<RefreshPerformancePhase>().Length];
+		private long _startedAt;
+
+		public void Begin() => _startedAt = Stopwatch.GetTimestamp();
+
+		public T Measure<T>(RefreshPerformancePhase phase, Func<T> action) {
+			long startedAt = Stopwatch.GetTimestamp();
+			try {
+				return action();
+			} finally {
+				AddElapsed(phase, startedAt);
+			}
+		}
+
+		public void Measure(RefreshPerformancePhase phase, Action action) {
+			long startedAt = Stopwatch.GetTimestamp();
+			try {
+				action();
+			} finally {
+				AddElapsed(phase, startedAt);
+			}
+		}
+
+		public void AddElapsed(RefreshPerformancePhase phase, long startedAt)
+			=> _ticks[(int)phase] += Stopwatch.GetTimestamp() - startedAt;
+
+		public void Report(string label, StorageItems storage, long revision, bool partial) {
+			if (_startedAt == 0)
+				return;
+
+			MagicStorageMod.Instance.Logger.Info(
+				$"Storage refresh baseline ({label}): units={storage?.StorageUnitCount ?? 0}, stacks={storage?.StoredItemCount ?? 0}, types={storage?.StoredTypeCount ?? 0}, quantity={storage?.StoredQuantity ?? 0}, " +
+				$"changedUnits={storage?.ChangedUnitCount ?? 0}, changedTypes={storage?.ChangedTypeCount ?? 0}, networkRevision={revision}, " +
+				$"storageTopologyRevision={storage?.TopologyRevision ?? 0}, storageContentRevision={storage?.ContentRevision ?? 0}, mode={(partial ? "partial" : "full")}, " +
+				$"collect={Milliseconds(RefreshPerformancePhase.Collection):F1}ms " +
+				$"topology={Milliseconds(RefreshPerformancePhase.Topology):F1}ms " +
+				$"snapshot={Milliseconds(RefreshPerformancePhase.Snapshot):F1}ms " +
+				$"filter={Milliseconds(RefreshPerformancePhase.Filtering):F1}ms " +
+				$"aggregate={Milliseconds(RefreshPerformancePhase.Aggregation):F1}ms " +
+				$"sort={Milliseconds(RefreshPerformancePhase.Sorting):F1}ms " +
+				$"count={Milliseconds(RefreshPerformancePhase.Counting):F1}ms " +
+				$"execute={Milliseconds(RefreshPerformancePhase.Execution):F1}ms " +
+				$"publish={Milliseconds(RefreshPerformancePhase.Publication):F1}ms " +
+				$"total={Stopwatch.GetElapsedTime(_startedAt).TotalMilliseconds:F1}ms");
+		}
+
+		private double Milliseconds(RefreshPerformancePhase phase)
+			=> _ticks[(int)phase] * 1000d / Stopwatch.Frequency;
 	}
 }

@@ -6,6 +6,8 @@ using Terraria.ModLoader.IO;
 
 namespace MagicStorage.Components
 {
+	internal readonly record struct StorageUnitSnapshot(Point16 Position, long Revision, IReadOnlyList<Item> Items);
+
 	public abstract class TEAbstractStorageUnit : TEStorageComponent
 	{
 		private Point16 center = Point16.NegativeOne;
@@ -25,6 +27,8 @@ namespace MagicStorage.Components
 		public abstract bool HasItem(Item check, bool ignorePrefix = false);
 
 		public abstract IEnumerable<Item> GetItems();
+
+		internal abstract StorageUnitSnapshot GetItemSnapshot();
 
 		public abstract void DepositItem(Item toDeposit);
 
